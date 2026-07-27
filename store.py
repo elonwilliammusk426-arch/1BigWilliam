@@ -77,3 +77,13 @@ def recent_all(limit: int = 10, path: str = DB_PATH):
             (limit,),
         ).fetchall()
     return [_row_to_message(r) for r in rows]
+
+
+def distinct_to_numbers(path: str = DB_PATH) -> list[str]:
+    """Numbers in this inbox that have received at least one message."""
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT DISTINCT to_number FROM inbound ORDER BY to_number"
+        ).fetchall()
+    return [r["to_number"] for r in rows]

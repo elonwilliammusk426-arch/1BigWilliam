@@ -11,6 +11,8 @@ services:
         value: https://api.telnyx.com/v2
       - key: TELNYX_FROM_NUMBER
         sync: false
+      - key: TELNYX_NUMBERS
+        sync: false
       - key: TELNYX_PUBLIC_KEY
         sync: false
       - key: TELNYX_SIGNATURE_TOLERANCE

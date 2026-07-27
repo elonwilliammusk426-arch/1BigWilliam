@@ -9,6 +9,7 @@ Commands:
     /latest [limit]             - show latest inbound SMS across all numbers
     /recent +14155550123 [limit]- show messages received on a number
     /numbers                    - list numbers that have received messages
+    /mynumbers                  - list owned/configured inbox numbers
     /available [country] [area] [limit] - search SMS-capable Telnyx numbers
     /testalert                  - send a test alert to TELEGRAM_ALERT_CHAT_ID
     /whoami                     - show your Telegram user id
@@ -42,6 +43,7 @@ HELP_TEXT = (
     "• /latest [limit] — latest inbound SMS across all numbers\n"
     "• /recent <number> [limit] — messages received on one number\n"
     "• /numbers — list numbers that have received messages\n"
+    "• /mynumbers — list owned/configured inbox numbers\n"
     "• /available [country] [area_code] [limit] — search SMS-capable Telnyx numbers\n"
     "• /testalert — send a test alert to the configured group\n"
     "• /whoami — show your Telegram user id\n"
@@ -130,17 +132,76 @@ async def recent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def numbers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _authorized(update):
         return
-    with __import__("sqlite3").connect(store.DB_PATH) as conn:
-        conn.row_factory = __import__("sqlite3").Row
-        rows = conn.execute(
-            "SELECT DISTINCT to_number FROM inbound ORDER BY to_number"
-        ).fetchall()
-    if not rows:
+    numbers = store.distinct_to_numbers()
+    if not numbers:
         await update.effective_message.reply_text("No numbers with messages yet.")
         return
     await update.effective_message.reply_text(
-        "Numbers with inbound SMS:\n" + "\n".join(r["to_number"] for r in rows)
+        "Numbers with inbound SMS:\n" + "\n".join(numbers)
     )
+
+
+def _configured_numbers() -> list[str]:
+    raw_values = [os.getenv("TELNYX_FROM_NUMBER", ""), os.getenv("TELNYX_NUMBERS", "")]
+    numbers: list[str] = []
+    for raw in raw_values:
+        for part in raw.replace(";", ",").split(","):
+            number = part.strip()
+            if number and number not in numbers:
+                numbers.append(number)
+    return numbers
+
+
+def _owned_telnyx_numbers() -> tuple[list[str], str | None]:
+    try:
+        cfg = load_config()
+        client = TelnyxClient(cfg.telnyx_api_key, cfg.telnyx_base_url)
+        rows = client.list_owned_numbers()
+        numbers: list[str] = []
+        for row in rows:
+            number = row.get("phone_number") or row.get("number")
+            if number and number not in numbers:
+                numbers.append(str(number))
+        return numbers, None
+    except Exception as exc:
+        return [], str(exc)
+
+
+def _format_my_numbers() -> str:
+    configured = _configured_numbers()
+    seen = store.distinct_to_numbers()
+    owned, api_error = _owned_telnyx_numbers()
+
+    merged: list[str] = []
+    for number in [*owned, *configured, *seen]:
+        if number and number not in merged:
+            merged.append(number)
+
+    if not merged:
+        text = "No numbers found yet. Add Telnyx numbers to the same Messaging Profile."
+    else:
+        lines = ["Your inbox numbers:"]
+        for number in merged:
+            tags = []
+            if number in owned:
+                tags.append("Telnyx")
+            if number in configured:
+                tags.append("configured")
+            if number in seen:
+                tags.append("received SMS")
+            suffix = f" ({', '.join(tags)})" if tags else ""
+            lines.append(f"• {number}{suffix}")
+        text = "\n".join(lines)
+
+    if api_error:
+        text += "\n\nNote: Could not fetch Telnyx account numbers. Showing configured/seen numbers."
+    return text[:MAX_TELEGRAM_MESSAGE]
+
+
+async def mynumbers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _authorized(update):
+        return
+    await update.effective_message.reply_text(_format_my_numbers())
 
 
 def _parse_available_args(args: list[str]) -> tuple[str, str | None, int]:
@@ -276,6 +337,7 @@ def main() -> None:
     app.add_handler(CommandHandler("latest", latest))
     app.add_handler(CommandHandler("recent", recent))
     app.add_handler(CommandHandler("numbers", numbers))
+    app.add_handler(CommandHandler("mynumbers", mynumbers))
     app.add_handler(CommandHandler("available", available))
     app.add_handler(CommandHandler("testalert", testalert))
     app.add_handler(CommandHandler("whoami", whoami))

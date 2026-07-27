@@ -227,6 +227,7 @@ Telegram commands, owner-only:
 /latest [limit]
 /recent +12015550123 [limit]
 /numbers
+/mynumbers
 /available [country] [area_code] [limit]
 /testalert
 /whoami

@@ -128,6 +128,14 @@ class TelnyxClient:
         resp.raise_for_status()
         return resp.json()
 
+    def list_owned_numbers(self, *, page_size: int = 100) -> list[dict[str, Any]]:
+        """List phone numbers already owned by this Telnyx account."""
+        params = {"page[size]": max(1, min(int(page_size), 250))}
+        resp = self.session.get(f"{self.base_url}/phone_numbers", params=params, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("data", [])
+
     def search_available_numbers(
         self,
         *,
