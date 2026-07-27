@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: sms-telegram-cloud
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1
+    envVars:
+      - key: TELNYX_API_KEY
+        sync: false
+      - key: TELNYX_BASE_URL
+        value: https://api.telnyx.com/v2
+      - key: TELNYX_FROM_NUMBER
+        sync: false
+      - key: TELNYX_PUBLIC_KEY
+        sync: false
+      - key: TELNYX_SIGNATURE_TOLERANCE
+        value: "300"
+      - key: OTP_LENGTH
+        value: "6"
+      - key: OTP_TTL_SECONDS
+        value: "300"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: OWNER_TELEGRAM_ID
+        sync: false
+      - key: TELEGRAM_ALERT_CHAT_ID
+        sync: false
