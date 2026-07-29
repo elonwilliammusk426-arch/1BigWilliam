@@ -11,6 +11,7 @@ Commands:
     /numbers                    - list numbers that have received messages
     /mynumbers                  - list owned/configured inbox numbers
     /available [country] [area] [limit] - search SMS-capable Telnyx numbers
+    /checknum +14155550123    - validate carrier/line type using Numverify
     /testalert                  - send a test alert to TELEGRAM_ALERT_CHAT_ID
     /whoami                     - show your Telegram user id
     /chatid                     - show the current chat/group id
@@ -29,6 +30,7 @@ except ImportError:  # pragma: no cover
 import notify
 import store
 from config import load_config
+from numverify import NumverifyError, format_numverify_result, validate_number
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from telnyx import TelnyxClient
@@ -45,13 +47,15 @@ HELP_TEXT = (
     "• /numbers — list numbers that have received messages\n"
     "• /mynumbers — list owned/configured inbox numbers\n"
     "• /available [country] [area_code] [limit] — search SMS-capable Telnyx numbers\n"
+    "• /checknum <number> — validate number/carrier/line type using Numverify\n"
     "• /testalert — send a test alert to the configured group\n"
     "• /whoami — show your Telegram user id\n"
     "• /chatid — show this chat/group id\n\n"
     "Examples:\n"
     "/recent +12015550123 10\n"
     "/available US 732 10\n"
-    "/available US any 20"
+    "/available US any 20\n"
+    "/checknum +13412043006"
 )
 
 
@@ -299,6 +303,22 @@ async def available(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def checknum(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _authorized(update):
+        return
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /checknum +13412043006")
+        return
+    try:
+        data = validate_number(context.args[0])
+        await update.effective_message.reply_text(format_numverify_result(data))
+    except NumverifyError as exc:
+        await update.effective_message.reply_text(
+            "Could not check number. Add NUMVERIFY_API_KEY in .env/Railway Variables.\n"
+            f"Error: {exc}"
+        )
+
+
 async def testalert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _authorized(update):
         return
@@ -339,6 +359,7 @@ def main() -> None:
     app.add_handler(CommandHandler("numbers", numbers))
     app.add_handler(CommandHandler("mynumbers", mynumbers))
     app.add_handler(CommandHandler("available", available))
+    app.add_handler(CommandHandler("checknum", checknum))
     app.add_handler(CommandHandler("testalert", testalert))
     app.add_handler(CommandHandler("whoami", whoami))
     app.add_handler(CommandHandler("chatid", chatid))

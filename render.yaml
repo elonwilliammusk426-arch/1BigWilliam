@@ -17,6 +17,10 @@ services:
         sync: false
       - key: TELNYX_SIGNATURE_TOLERANCE
         value: "300"
+      - key: NUMVERIFY_API_KEY
+        sync: false
+      - key: NUMVERIFY_BASE_URL
+        value: https://apilayer.net/api/validate
       - key: OTP_LENGTH
         value: "6"
       - key: OTP_TTL_SECONDS

@@ -229,6 +229,7 @@ Telegram commands, owner-only:
 /numbers
 /mynumbers
 /available [country] [area_code] [limit]
+/checknum +12015550123
 /testalert
 /whoami
 /chatid
@@ -241,9 +242,12 @@ Examples:
 /available 732
 /available US 732 10
 /available US any 20
+/checknum +13412043006
 ```
 
 `/available` searches Telnyx inventory for SMS-capable local numbers. It does **not** buy/order the number.
+
+`/checknum` uses Numverify to validate a number and show metadata like country, carrier, and line type. It requires `NUMVERIFY_API_KEY`. It does **not** provide numbers or receive SMS.
 
 Inbound SMS alerts drop into `TELEGRAM_ALERT_CHAT_ID`. Bot commands remain locked to `OWNER_TELEGRAM_ID`.
 

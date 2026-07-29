@@ -28,6 +28,7 @@ except ImportError:  # pragma: no cover
 import notify
 import store
 from config import load_config
+from numverify import NumverifyError, format_numverify_result, validate_number
 from telnyx import TelnyxClient
 from telnyx_webhook import parse_inbound_payload, verify_telnyx_signature
 
@@ -43,13 +44,15 @@ HELP_TEXT = (
     "• /numbers — list numbers that have received messages\n"
     "• /mynumbers — list owned/configured inbox numbers\n"
     "• /available [country] [area_code] [limit] — search SMS-capable Telnyx numbers\n"
+    "• /checknum <number> — validate number/carrier/line type using Numverify\n"
     "• /testalert — send a test alert to the configured group\n"
     "• /whoami — show your Telegram user id\n"
     "• /chatid — show this chat/group id\n\n"
     "Examples:\n"
     "/recent +13412043006 10\n"
     "/available US 732 10\n"
-    "/available US any 20"
+    "/available US any 20\n"
+    "/checknum +13412043006"
 )
 
 
@@ -332,6 +335,20 @@ def telegram_webhook():
                 "Could not search available numbers. Check TELNYX_API_KEY.\n"
                 f"Error: {exc}",
             )
+
+    elif command == "/checknum":
+        if not args:
+            send_telegram(chat_id, "Usage: /checknum +13412043006")
+        else:
+            try:
+                data = validate_number(args[0])
+                send_telegram(chat_id, format_numverify_result(data))
+            except NumverifyError as exc:
+                send_telegram(
+                    chat_id,
+                    "Could not check number. Add NUMVERIFY_API_KEY in Railway Variables.\n"
+                    f"Error: {exc}",
+                )
 
     elif command == "/testalert":
         notify.notify_owner("✅ Telegram group alert test successful.")

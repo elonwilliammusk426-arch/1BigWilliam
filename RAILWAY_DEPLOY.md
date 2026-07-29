@@ -70,6 +70,8 @@ TELNYX_FROM_NUMBER=+13412043006
 TELNYX_NUMBERS=+13412043006
 TELNYX_PUBLIC_KEY=
 TELNYX_SIGNATURE_TOLERANCE=300
+NUMVERIFY_API_KEY=
+NUMVERIFY_BASE_URL=https://apilayer.net/api/validate
 OTP_LENGTH=6
 OTP_TTL_SECONDS=300
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
@@ -159,7 +161,11 @@ In Telegram:
 ```text
 /help
 /testalert
+/mynumbers
+/checknum +13412043006
 ```
+
+`/checknum` works only after you add `NUMVERIFY_API_KEY`.
 
 Then send an SMS to your Telnyx number:
 
