@@ -61,7 +61,7 @@ Add these in Render Environment settings:
 ```env
 TELNYX_API_KEY=your_telnyx_api_key
 TELNYX_BASE_URL=https://api.telnyx.com/v2
-TELNYX_FROM_NUMBER=+13412043006
+TELNYX_FROM_NUMBER=+15306908868
 TELNYX_PUBLIC_KEY=
 TELNYX_SIGNATURE_TOLERANCE=300
 NUMVERIFY_API_KEY=
@@ -143,7 +143,7 @@ Save.
 1. Text your Telnyx number:
 
 ```text
-+13412043006
++15306908868
 ```
 
 2. The SMS should drop into your Telegram alert group.
@@ -154,7 +154,7 @@ Save.
 /help
 /testalert
 /latest
-/recent +13412043006
+/recent +15306908868
 ```
 
 ---

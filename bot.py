@@ -40,22 +40,24 @@ MAX_TELEGRAM_MESSAGE = 3900
 
 
 HELP_TEXT = (
-    "SMS inbox bot (owner only).\n\n"
-    "Commands:\n"
-    "• /latest [limit] — latest inbound SMS across all numbers\n"
-    "• /recent <number> [limit] — messages received on one number\n"
-    "• /numbers — list numbers that have received messages\n"
-    "• /mynumbers — list owned/configured inbox numbers\n"
-    "• /available [country] [area_code] [limit] — search SMS-capable Telnyx numbers\n"
-    "• /checknum <number> — validate number/carrier/line type using Numverify\n"
-    "• /testalert — send a test alert to the configured group\n"
-    "• /whoami — show your Telegram user id\n"
-    "• /chatid — show this chat/group id\n\n"
+    "📩 1BigWilliam SMS Inbox\n"
+    "Owner-only control panel.\n\n"
+    "Inbox:\n"
+    "• /latest [limit] — latest messages\n"
+    "• /recent <number> [limit] — messages for one number\n"
+    "• /numbers — numbers that received SMS\n"
+    "• /mynumbers — configured/owned numbers\n\n"
+    "Tools:\n"
+    "• /available [country] [area] [limit] — search Telnyx numbers\n"
+    "• /checknum <number> — validate carrier/line type\n"
+    "• /testalert — test Telegram alert\n\n"
+    "Setup:\n"
+    "• /whoami — your Telegram user id\n"
+    "• /chatid — this chat/group id\n\n"
     "Examples:\n"
-    "/recent +12015550123 10\n"
-    "/available US 732 10\n"
-    "/available US any 20\n"
-    "/checknum +13412043006"
+    "/recent +15306908868 10\n"
+    "/available US any 5\n"
+    "/checknum +15306908868"
 )
 
 
@@ -307,7 +309,7 @@ async def checknum(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _authorized(update):
         return
     if not context.args:
-        await update.effective_message.reply_text("Usage: /checknum +13412043006")
+        await update.effective_message.reply_text("Usage: /checknum +15306908868")
         return
     try:
         data = validate_number(context.args[0])

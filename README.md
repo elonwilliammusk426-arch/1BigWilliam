@@ -242,7 +242,7 @@ Examples:
 /available 732
 /available US 732 10
 /available US any 20
-/checknum +13412043006
+/checknum +15306908868
 ```
 
 `/available` searches Telnyx inventory for SMS-capable local numbers. It does **not** buy/order the number.

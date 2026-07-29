@@ -66,8 +66,8 @@ Add:
 ```env
 TELNYX_API_KEY=your_telnyx_api_key
 TELNYX_BASE_URL=https://api.telnyx.com/v2
-TELNYX_FROM_NUMBER=+13412043006
-TELNYX_NUMBERS=+13412043006
+TELNYX_FROM_NUMBER=+15306908868
+TELNYX_NUMBERS=+15306908868
 TELNYX_PUBLIC_KEY=
 TELNYX_SIGNATURE_TOLERANCE=300
 NUMVERIFY_API_KEY=
@@ -162,7 +162,7 @@ In Telegram:
 /help
 /testalert
 /mynumbers
-/checknum +13412043006
+/checknum +15306908868
 ```
 
 `/checknum` works only after you add `NUMVERIFY_API_KEY`.
@@ -170,7 +170,7 @@ In Telegram:
 Then send an SMS to your Telnyx number:
 
 ```text
-+13412043006
++15306908868
 ```
 
 The SMS should drop into your Telegram alert group.
