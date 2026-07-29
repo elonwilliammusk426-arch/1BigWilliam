@@ -30,7 +30,7 @@ import store
 from config import load_config
 from numverify import NumverifyError, format_numverify_result, validate_number
 from telnyx import TelnyxClient
-from telnyx_webhook import parse_inbound_payload, verify_telnyx_signature
+from telnyx_webhook import parse_telnyx_inbound_event, verify_telnyx_signature
 
 app = Flask(__name__)
 store.init_db()
@@ -233,11 +233,16 @@ def inbound_sms():
     event = request.get_json(silent=True) or {}
     data = event.get("data", {})
     event_type = data.get("event_type")
-    if event_type != "message.received":
-        return jsonify({"ok": True, "ignored": event_type or "unknown"}), 200
 
-    parsed = parse_inbound_payload(data.get("payload", {}))
+    parsed = parse_telnyx_inbound_event(event)
     if not parsed:
+        # Telnyx also sends delivery status events; ignore those quietly.
+        if event_type in {"message.sent", "message.finalized"}:
+            return jsonify({"ok": True, "ignored": event_type}), 200
+        notify.notify_owner(
+            "⚠️ Telnyx webhook received but could not parse inbound SMS.\n"
+            f"Event type: {event_type or 'unknown'}"
+        )
         return jsonify({"ok": False, "error": "could_not_parse_payload"}), 400
 
     to_number, from_number, body, message_id = parsed

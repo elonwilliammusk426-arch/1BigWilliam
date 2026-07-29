@@ -42,13 +42,15 @@ def inbound_sms():
     data = event.get("data", {})
     event_type = data.get("event_type")
 
-    # Telnyx will also send delivery status events. We only store inbound SMS.
-    if event_type != "message.received":
-        return jsonify({"ok": True, "ignored": event_type or "unknown"}), 200
-
-    payload = data.get("payload", {})
-    parsed = parse_inbound_payload(payload)
+    parsed = parse_telnyx_inbound_event(event)
     if not parsed:
+        # Telnyx also sends delivery status events; ignore those quietly.
+        if event_type in {"message.sent", "message.finalized"}:
+            return jsonify({"ok": True, "ignored": event_type}), 200
+        notify.notify_owner(
+            "⚠️ Telnyx webhook received but could not parse inbound SMS.\n"
+            f"Event type: {event_type or 'unknown'}"
+        )
         return jsonify({"ok": False, "error": "could_not_parse_payload"}), 400
 
     to_number, from_number, body, message_id = parsed
@@ -70,11 +72,60 @@ def health():
     return jsonify({"ok": True, "provider": "telnyx"}), 200
 
 
+def parse_telnyx_inbound_event(event: dict[str, Any]) -> tuple[str, str, str, str | None] | None:
+    """Parse known Telnyx inbound webhook shapes.
+
+    Primary expected shape is API v2:
+        {"data": {"event_type": "message.received", "payload": {...}}}
+
+    This also accepts a fallback MDR-like shape because some Telnyx screens/logs
+    display inbound records as `record_type=message`, `direction=inbound`,
+    `cli`/`cld`.
+    """
+    data = event.get("data", {}) if isinstance(event, dict) else {}
+    event_type = data.get("event_type")
+    payload = data.get("payload", {}) if isinstance(data, dict) else {}
+
+    if event_type == "message.received" and isinstance(payload, dict):
+        return parse_inbound_payload(payload)
+
+    # Be forgiving: if Telnyx sends a raw payload-like object.
+    for candidate in (payload, data, event):
+        if not isinstance(candidate, dict):
+            continue
+        parsed = parse_inbound_payload(candidate)
+        if parsed:
+            # Only accept generic payload parsing for inbound-ish records or when
+            # the canonical fields are present.
+            if (
+                candidate.get("direction") == "inbound"
+                or candidate.get("record_type") == "message"
+                or candidate.get("from")
+            ):
+                return parsed
+
+        # MDR/detail-record style: cli = sender, cld = destination.
+        if candidate.get("record_type") == "message" and candidate.get("direction") == "inbound":
+            from_number = str(candidate.get("cli") or candidate.get("from") or "")
+            to_number = str(candidate.get("cld") or candidate.get("to") or "")
+            body = str(
+                candidate.get("text")
+                or candidate.get("body")
+                or candidate.get("message")
+                or "(inbound SMS received; text missing from webhook payload)"
+            )
+            message_id = candidate.get("id")
+            if from_number and to_number:
+                return to_number, from_number, body, message_id
+
+    return None
+
+
 def parse_inbound_payload(payload: dict[str, Any]) -> tuple[str, str, str, str | None] | None:
     """Return (to_number, from_number, body, message_id) from Telnyx payload."""
     from_number = _phone(payload.get("from"))
     to_number = _first_to_number(payload.get("to"))
-    body = payload.get("text") or ""
+    body = payload.get("text") or payload.get("body") or payload.get("message") or ""
     message_id = payload.get("id")
 
     if not from_number or not to_number:
