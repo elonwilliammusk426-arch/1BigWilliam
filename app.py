@@ -30,10 +30,12 @@ import store
 from config import load_config
 from numverify import NumverifyError, format_numverify_result, validate_number
 from telnyx import TelnyxClient
+from telnyx_sync import start_polling_if_enabled, sync_inbound_once
 from telnyx_webhook import parse_telnyx_inbound_event, verify_telnyx_signature
 
 app = Flask(__name__)
 store.init_db()
+start_polling_if_enabled()
 
 MAX_TELEGRAM_MESSAGE = 3900
 HELP_TEXT = (
@@ -356,6 +358,18 @@ def telegram_webhook():
                     "Could not check number. Add NUMVERIFY_API_KEY in Railway Variables.\n"
                     f"Error: {exc}",
                 )
+
+    elif command == "/syncsms":
+        limit = _parse_limit(args[0] if args else None, default=20)
+        try:
+            res = sync_inbound_once(limit=limit, notify_new=True)
+            send_telegram(
+                chat_id,
+                f"Sync complete. Checked: {res.checked}, stored new: {res.stored}, skipped: {res.skipped}."
+                + (f"\nErrors: {'; '.join(res.errors[:3])}" if res.errors else ""),
+            )
+        except Exception as exc:
+            send_telegram(chat_id, f"Sync failed: {exc}")
 
     elif command == "/testalert":
         notify.notify_owner("✅ Telegram group alert test successful.")

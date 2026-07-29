@@ -34,6 +34,7 @@ from numverify import NumverifyError, format_numverify_result, validate_number
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from telnyx import TelnyxClient
+from telnyx_sync import sync_inbound_once
 
 OWNER_ID = int(os.getenv("OWNER_TELEGRAM_ID", "0") or "0")
 MAX_TELEGRAM_MESSAGE = 3900
@@ -321,6 +322,20 @@ async def checknum(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
+async def syncsms(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _authorized(update):
+        return
+    limit = _parse_limit(context.args[0] if context.args else None, default=20)
+    try:
+        res = sync_inbound_once(limit=limit, notify_new=True)
+        await update.effective_message.reply_text(
+            f"Sync complete. Checked: {res.checked}, stored new: {res.stored}, skipped: {res.skipped}."
+            + (f"\nErrors: {'; '.join(res.errors[:3])}" if res.errors else "")
+        )
+    except Exception as exc:
+        await update.effective_message.reply_text(f"Sync failed: {exc}")
+
+
 async def testalert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _authorized(update):
         return
@@ -362,6 +377,7 @@ def main() -> None:
     app.add_handler(CommandHandler("mynumbers", mynumbers))
     app.add_handler(CommandHandler("available", available))
     app.add_handler(CommandHandler("checknum", checknum))
+    app.add_handler(CommandHandler("syncsms", syncsms))
     app.add_handler(CommandHandler("testalert", testalert))
     app.add_handler(CommandHandler("whoami", whoami))
     app.add_handler(CommandHandler("chatid", chatid))

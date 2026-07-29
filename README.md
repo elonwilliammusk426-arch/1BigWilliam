@@ -229,7 +229,8 @@ Telegram commands, owner-only:
 /numbers
 /mynumbers
 /available [country] [area_code] [limit]
-/checknum +12015550123
+/checknum +15306908868
+/syncsms [limit]
 /testalert
 /whoami
 /chatid
