@@ -30,7 +30,8 @@ def sync_inbound_once(limit: int = 20, *, notify_new: bool = True) -> SyncResult
     result = SyncResult(errors=[])
     cfg = load_config()
     client = TelnyxClient(cfg.telnyx_api_key, cfg.telnyx_base_url)
-    records = client.list_messaging_detail_records(date_range="today", direction="inbound", limit=limit)
+    date_range = os.getenv("TELNYX_SYNC_DATE_RANGE", "").strip() or None
+    records = client.list_messaging_detail_records(date_range=date_range, direction="inbound", limit=limit)
 
     # Telnyx returns newest first; process oldest first so Telegram order is sane.
     for rec in reversed(records):

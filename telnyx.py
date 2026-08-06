@@ -131,16 +131,22 @@ class TelnyxClient:
     def list_messaging_detail_records(
         self,
         *,
-        date_range: str = "today",
+        date_range: str | None = None,
         direction: str | None = None,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
-        """List Telnyx messaging detail records (MDRs)."""
+        """List Telnyx messaging detail records (MDRs).
+
+        If date_range is None, Telnyx returns recent records across the account.
+        That is safer for the Telegram sync fallback because UTC date boundaries
+        can make a just-sent SMS appear as "yesterday" relative to the app.
+        """
         params: dict[str, Any] = {
             "filter[record_type]": "messaging",
-            "filter[date_range]": date_range,
             "page[size]": max(1, min(int(limit), 100)),
         }
+        if date_range:
+            params["filter[date_range]"] = date_range
         if direction:
             params["filter[direction]"] = direction
         resp = self.session.get(f"{self.base_url}/detail_records", params=params, timeout=20)
