@@ -109,7 +109,7 @@ TELNYX_EXTRA_PUBLIC_KEYS=
 TELNYX_SIGNATURE_TOLERANCE=300
 ```
 
-If you use multiple Telnyx accounts in the same Railway app, keep the primary account in `TELNYX_API_KEY` / `TELNYX_PUBLIC_KEY` and put other account keys in `TELNYX_EXTRA_API_KEYS` / `TELNYX_EXTRA_PUBLIC_KEYS`, comma-separated.
+If you use multiple Telnyx accounts in the same Railway app, keep the primary account in `TELNYX_API_KEY` / `TELNYX_PUBLIC_KEY` and put other account keys in `TELNYX_EXTRA_API_KEYS` / `TELNYX_EXTRA_PUBLIC_KEYS`, comma-separated. See `MULTI_TELNYX_ACCOUNTS.md` and `RAILWAY_VARIABLES_TEMPLATE.env` for a copy-paste template.
 
 ---
 

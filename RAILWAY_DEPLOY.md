@@ -61,7 +61,7 @@ In Railway:
 Project → Service → Variables
 ```
 
-Add:
+Add the variables below, or copy from `RAILWAY_VARIABLES_TEMPLATE.env` and replace the placeholders.
 
 ```env
 TELNYX_API_KEY=your_primary_telnyx_api_key
