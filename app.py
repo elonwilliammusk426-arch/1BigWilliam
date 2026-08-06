@@ -30,7 +30,7 @@ import store
 from config import load_config
 from numverify import NumverifyError, format_numverify_result, validate_number
 from telnyx import TelnyxClient
-from telnyx_sync import start_polling_if_enabled, sync_inbound_once
+from telnyx_sync import list_all_owned_numbers, start_polling_if_enabled, sync_inbound_once
 from telnyx_webhook import parse_telnyx_inbound_event, verify_telnyx_signature
 
 app = Flask(__name__)
@@ -49,6 +49,7 @@ HELP_TEXT = (
     "Tools:\n"
     "• /available [country] [area] [limit] — search Telnyx numbers\n"
     "• /checknum <number> — validate carrier/line type\n"
+    "• /syncsms [limit] — pull missed SMS from Telnyx\n"
     "• /testalert — test Telegram alert\n\n"
     "Setup:\n"
     "• /whoami — your Telegram user id\n"
@@ -177,19 +178,9 @@ def _configured_numbers() -> list[str]:
 
 
 def _owned_telnyx_numbers() -> tuple[list[str], str | None]:
-    """Return Telnyx-owned numbers if API key works, plus optional error."""
-    try:
-        cfg = load_config()
-        client = TelnyxClient(cfg.telnyx_api_key, cfg.telnyx_base_url)
-        rows = client.list_owned_numbers()
-        numbers: list[str] = []
-        for row in rows:
-            number = row.get("phone_number") or row.get("number")
-            if number and number not in numbers:
-                numbers.append(str(number))
-        return numbers, None
-    except Exception as exc:
-        return [], str(exc)
+    """Return Telnyx-owned numbers across all configured accounts."""
+    numbers, errors = list_all_owned_numbers()
+    return numbers, "; ".join(errors) if errors else None
 
 
 def _format_my_numbers() -> str:
@@ -365,7 +356,7 @@ def telegram_webhook():
             res = sync_inbound_once(limit=limit, notify_new=True)
             send_telegram(
                 chat_id,
-                f"Sync complete. Checked: {res.checked}, stored new: {res.stored}, skipped: {res.skipped}."
+                f"Sync complete. Accounts: {res.accounts}, checked: {res.checked}, stored new: {res.stored}, skipped: {res.skipped}."
                 + (f"\nErrors: {'; '.join(res.errors[:3])}" if res.errors else ""),
             )
         except Exception as exc:

@@ -91,7 +91,9 @@ Minimum values:
 
 ```env
 TELNYX_API_KEY=KEYxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-TELNYX_FROM_NUMBER=+12015550123
+TELNYX_EXTRA_API_KEYS=
+TELNYX_FROM_NUMBER=+15306908868
+TELNYX_NUMBERS=+15306908868
 TELEGRAM_BOT_TOKEN=123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 OWNER_TELEGRAM_ID=000000000
 TELEGRAM_ALERT_CHAT_ID=-1001234567890
@@ -102,9 +104,12 @@ Use `OWNER_TELEGRAM_ID` for your personal Telegram user id. Use `TELEGRAM_ALERT_
 Recommended for production:
 
 ```env
-TELNYX_PUBLIC_KEY=your_telnyx_webhook_public_key_here
+TELNYX_PUBLIC_KEY=your_primary_telnyx_webhook_public_key_here
+TELNYX_EXTRA_PUBLIC_KEYS=
 TELNYX_SIGNATURE_TOLERANCE=300
 ```
+
+If you use multiple Telnyx accounts in the same Railway app, keep the primary account in `TELNYX_API_KEY` / `TELNYX_PUBLIC_KEY` and put other account keys in `TELNYX_EXTRA_API_KEYS` / `TELNYX_EXTRA_PUBLIC_KEYS`, comma-separated.
 
 ---
 

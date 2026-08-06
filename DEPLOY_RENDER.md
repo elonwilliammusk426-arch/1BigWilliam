@@ -59,10 +59,13 @@ gunicorn app:app --bind 0.0.0.0:$PORT --workers 1
 Add these in Render Environment settings:
 
 ```env
-TELNYX_API_KEY=your_telnyx_api_key
+TELNYX_API_KEY=your_primary_telnyx_api_key
+TELNYX_EXTRA_API_KEYS=
 TELNYX_BASE_URL=https://api.telnyx.com/v2
 TELNYX_FROM_NUMBER=+15306908868
+TELNYX_NUMBERS=+15306908868
 TELNYX_PUBLIC_KEY=
+TELNYX_EXTRA_PUBLIC_KEYS=
 TELNYX_SIGNATURE_TOLERANCE=300
 NUMVERIFY_API_KEY=
 NUMVERIFY_BASE_URL=https://apilayer.net/api/validate

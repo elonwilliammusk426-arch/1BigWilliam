@@ -12,6 +12,7 @@ Commands:
     /mynumbers                  - list owned/configured inbox numbers
     /available [country] [area] [limit] - search SMS-capable Telnyx numbers
     /checknum +14155550123    - validate carrier/line type using Numverify
+    /syncsms [limit]          - pull missed SMS from Telnyx
     /testalert                  - send a test alert to TELEGRAM_ALERT_CHAT_ID
     /whoami                     - show your Telegram user id
     /chatid                     - show the current chat/group id
@@ -34,7 +35,7 @@ from numverify import NumverifyError, format_numverify_result, validate_number
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from telnyx import TelnyxClient
-from telnyx_sync import sync_inbound_once
+from telnyx_sync import list_all_owned_numbers, sync_inbound_once
 
 OWNER_ID = int(os.getenv("OWNER_TELEGRAM_ID", "0") or "0")
 MAX_TELEGRAM_MESSAGE = 3900
@@ -51,6 +52,7 @@ HELP_TEXT = (
     "Tools:\n"
     "• /available [country] [area] [limit] — search Telnyx numbers\n"
     "• /checknum <number> — validate carrier/line type\n"
+    "• /syncsms [limit] — pull missed SMS from Telnyx\n"
     "• /testalert — test Telegram alert\n\n"
     "Setup:\n"
     "• /whoami — your Telegram user id\n"
@@ -160,18 +162,8 @@ def _configured_numbers() -> list[str]:
 
 
 def _owned_telnyx_numbers() -> tuple[list[str], str | None]:
-    try:
-        cfg = load_config()
-        client = TelnyxClient(cfg.telnyx_api_key, cfg.telnyx_base_url)
-        rows = client.list_owned_numbers()
-        numbers: list[str] = []
-        for row in rows:
-            number = row.get("phone_number") or row.get("number")
-            if number and number not in numbers:
-                numbers.append(str(number))
-        return numbers, None
-    except Exception as exc:
-        return [], str(exc)
+    numbers, errors = list_all_owned_numbers()
+    return numbers, "; ".join(errors) if errors else None
 
 
 def _format_my_numbers() -> str:
@@ -329,7 +321,7 @@ async def syncsms(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         res = sync_inbound_once(limit=limit, notify_new=True)
         await update.effective_message.reply_text(
-            f"Sync complete. Checked: {res.checked}, stored new: {res.stored}, skipped: {res.skipped}."
+            f"Sync complete. Accounts: {res.accounts}, checked: {res.checked}, stored new: {res.stored}, skipped: {res.skipped}."
             + (f"\nErrors: {'; '.join(res.errors[:3])}" if res.errors else "")
         )
     except Exception as exc:

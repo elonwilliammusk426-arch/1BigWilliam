@@ -147,15 +147,38 @@ def _first_to_number(value: Any) -> str:
     return _phone(value)
 
 
-def verify_telnyx_signature(raw_body: bytes, headers) -> bool:
-    """Verify Telnyx Ed25519 webhook signature when TELNYX_PUBLIC_KEY is set.
+def _configured_public_keys() -> list[str]:
+    """Return all configured Telnyx webhook public keys.
 
-    For local development, if TELNYX_PUBLIC_KEY is empty we accept the webhook.
-    In production, set TELNYX_PUBLIC_KEY from the Telnyx portal so forged POSTs
-    cannot be inserted into your inbox.
+    Backward-compatible:
+      - TELNYX_PUBLIC_KEY for one account.
+      - TELNYX_PUBLIC_KEYS for comma-separated keys.
+      - TELNYX_EXTRA_PUBLIC_KEYS for additional accounts.
     """
-    public_key_b64 = os.getenv("TELNYX_PUBLIC_KEY", "").strip()
-    if not public_key_b64:
+    keys: list[str] = []
+    raw_values = (
+        os.getenv("TELNYX_PUBLIC_KEYS", ""),
+        os.getenv("TELNYX_PUBLIC_KEY", ""),
+        os.getenv("TELNYX_EXTRA_PUBLIC_KEYS", ""),
+    )
+    for raw in raw_values:
+        for item in raw.replace(";", ",").replace("\n", ",").split(","):
+            key = item.strip()
+            if key and key not in keys:
+                keys.append(key)
+    return keys
+
+
+def verify_telnyx_signature(raw_body: bytes, headers) -> bool:
+    """Verify Telnyx Ed25519 webhook signature when public key(s) are set.
+
+    For local development, if no public key is configured we accept the webhook.
+    In production, set TELNYX_PUBLIC_KEY or TELNYX_PUBLIC_KEYS from Telnyx.
+    Multiple Telnyx accounts can post to the same Railway URL when all their
+    public keys are configured.
+    """
+    public_keys = _configured_public_keys()
+    if not public_keys:
         return True
 
     signature_b64 = headers.get("telnyx-signature-ed25519") or headers.get(
@@ -177,12 +200,17 @@ def verify_telnyx_signature(raw_body: bytes, headers) -> bool:
         from nacl.exceptions import BadSignatureError
         from nacl.signing import VerifyKey
 
-        public_key = base64.b64decode(public_key_b64)
         signature = base64.b64decode(signature_b64)
         signed_payload = timestamp.encode("utf-8") + b"|" + raw_body
-        VerifyKey(public_key).verify(signed_payload, signature)
-        return True
-    except (ValueError, BadSignatureError, Exception):
+        for public_key_b64 in public_keys:
+            try:
+                public_key = base64.b64decode(public_key_b64)
+                VerifyKey(public_key).verify(signed_payload, signature)
+                return True
+            except (ValueError, BadSignatureError):
+                continue
+        return False
+    except Exception:
         return False
 
 
