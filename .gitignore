@@ -5,3 +5,11 @@ __pycache__/
 .venv/
 .env.*
 !.env.example
+
+# Telnyx bulk audit secrets/results
+telnyx_keys_input*.txt
+telnyx_valid_with_numbers*.csv
+telnyx_valid_no_numbers*.csv
+telnyx_invalid_keys*.csv
+telnyx_audit_summary*.txt
+railway_values_generated*.env
