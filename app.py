@@ -70,15 +70,40 @@ def _owner_id() -> int:
     return int(os.getenv("OWNER_TELEGRAM_ID", "0") or "0")
 
 
+def _telegram_chunks(text: str, limit: int = MAX_TELEGRAM_MESSAGE) -> list[str]:
+    """Split long Telegram messages without cutting lines when possible."""
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    current = ""
+    for line in text.splitlines(keepends=True):
+        if len(line) > limit:
+            if current:
+                chunks.append(current)
+                current = ""
+            for i in range(0, len(line), limit):
+                chunks.append(line[i : i + limit])
+            continue
+        if len(current) + len(line) > limit:
+            chunks.append(current)
+            current = line
+        else:
+            current += line
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def send_telegram(chat_id: int | str, text: str) -> None:
     token = _telegram_token()
     if not token or not chat_id:
         return
-    requests.post(
-        f"https://api.telegram.org/bot{token}/sendMessage",
-        json={"chat_id": chat_id, "text": text[:MAX_TELEGRAM_MESSAGE]},
-        timeout=15,
-    )
+    for chunk in _telegram_chunks(text):
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": chunk},
+            timeout=15,
+        )
 
 
 def _authorized(user_id: int | None) -> bool:
