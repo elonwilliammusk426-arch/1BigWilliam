@@ -26,6 +26,7 @@ COMMANDS = [
     {"command": "recent", "description": "Recent SMS for one number"},
     {"command": "numbers", "description": "Numbers that received SMS"},
     {"command": "mynumbers", "description": "Owned/configured inbox numbers"},
+    {"command": "accounts", "description": "Check Telnyx accounts/API keys"},
     {"command": "available", "description": "Search SMS-capable Telnyx numbers"},
     {"command": "checknum", "description": "Validate carrier/line type"},
     {"command": "syncsms", "description": "Pull missed SMS from Telnyx"},

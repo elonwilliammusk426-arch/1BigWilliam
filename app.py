@@ -30,7 +30,7 @@ import store
 from config import load_config
 from numverify import NumverifyError, format_numverify_result, validate_number
 from telnyx import TelnyxClient
-from telnyx_sync import list_all_owned_numbers, start_polling_if_enabled, sync_inbound_once
+from telnyx_sync import list_all_owned_numbers, start_polling_if_enabled, sync_inbound_once, telnyx_clients
 from telnyx_webhook import parse_telnyx_inbound_event, verify_telnyx_signature
 
 app = Flask(__name__)
@@ -45,7 +45,8 @@ HELP_TEXT = (
     "• /latest [limit] — latest messages\n"
     "• /recent <number> [limit] — messages for one number\n"
     "• /numbers — numbers that received SMS\n"
-    "• /mynumbers — configured/owned numbers\n\n"
+    "• /mynumbers — configured/owned numbers\n"
+    "• /accounts — diagnose Telnyx API keys/accounts\n\n"
     "Tools:\n"
     "• /available [country] [area] [limit] — search Telnyx numbers\n"
     "• /checknum <number> — validate carrier/line type\n"
@@ -214,6 +215,45 @@ def _format_my_numbers() -> str:
     return text[:MAX_TELEGRAM_MESSAGE]
 
 
+def _format_accounts_report() -> str:
+    configured = set(_configured_numbers())
+    lines = ["Telnyx account check:"]
+    owned_all: set[str] = set()
+    account_count = 0
+
+    try:
+        clients = telnyx_clients()
+    except Exception as exc:
+        return f"Could not load Telnyx API keys: {exc}"
+
+    if not clients:
+        return "No Telnyx API keys configured."
+
+    for label, client in clients:
+        account_count += 1
+        try:
+            rows = client.list_owned_numbers()
+            numbers = [str(r.get("phone_number") or r.get("number") or "") for r in rows]
+            numbers = [n for n in numbers if n]
+            owned_all.update(numbers)
+            if numbers:
+                lines.append(f"• {label}: OK — " + ", ".join(numbers))
+            else:
+                lines.append(f"• {label}: OK — no numbers found")
+        except Exception as exc:
+            lines.append(f"• {label}: ERROR — {exc}")
+
+    configured_only = sorted(n for n in configured if n not in owned_all)
+    if configured_only:
+        lines.append("\nConfigured but not found through current API keys:")
+        for n in configured_only:
+            lines.append(f"• {n}")
+
+    lines.append(f"\nAccounts checked: {account_count}")
+    text = "\n".join(lines)
+    return text[:MAX_TELEGRAM_MESSAGE]
+
+
 @app.get("/health")
 def health():
     return jsonify({"ok": True, "service": "sms-telegram-cloud"}), 200
@@ -315,6 +355,9 @@ def telegram_webhook():
 
     elif command == "/mynumbers":
         send_telegram(chat_id, _format_my_numbers())
+
+    elif command == "/accounts":
+        send_telegram(chat_id, _format_accounts_report())
 
     elif command == "/available":
         country, area_code, limit = _parse_available_args(args)
