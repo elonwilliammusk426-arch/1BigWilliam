@@ -1,6 +1,15 @@
-# SMS Toolkit (Python + Telnyx)
+# 1BigWilliam — SMS Toolkit (Python + Telnyx)
 
 A compliant SMS toolkit for numbers **you own/control through Telnyx**.
+
+## Quick links
+
+- Public repo: `https://github.com/elonwilliammusk426-arch/1BigWilliam`
+- Git clone URL: `https://github.com/elonwilliammusk426-arch/1BigWilliam.git`
+- Railway deployment guide: `RAILWAY_DEPLOY.md`
+- Multi-account setup: `MULTI_TELNYX_ACCOUNTS.md`
+- Mobile setup guide: `MOBILE_RAILWAY_CHECKLIST.md`
+- Railway variable template: `RAILWAY_VARIABLES_TEMPLATE.env`
 
 It covers the selected use cases:
 
@@ -288,7 +297,37 @@ Then in Telegram:
 
 ---
 
-## 9. Security / production checklist
+## 9. Audit a batch of Telnyx API keys
+
+If you receive a large batch of Telnyx API keys that you are authorized to audit, use the included tool:
+
+```bash
+python tools/audit_telnyx_keys.py telnyx_keys_input.txt
+```
+
+Best input format:
+
+- plain `.txt`
+- one copied API key per line
+- use the Telnyx **Copy** button; do not hand-type keys
+
+Expected valid Telnyx API keys are usually about 58 characters long. Many bad community batches are shorter and fail immediately.
+
+Outputs created in the current directory:
+
+```text
+telnyx_valid_with_numbers.csv
+telnyx_valid_no_numbers.csv
+telnyx_invalid_keys.csv
+telnyx_audit_summary.txt
+railway_values_generated.env
+```
+
+Use this only for Telnyx accounts you own/administer or are explicitly authorized to check.
+
+---
+
+## 10. Security / production checklist
 
 - Set `TELNYX_PUBLIC_KEY` and keep signature verification enabled.
 - Use HTTPS for the webhook.

@@ -26,7 +26,7 @@ So in production you do **not** need to run `bot.py` polling separately.
 
 Render normally deploys from GitHub.
 
-Create a private GitHub repo and upload the project folder contents.
+Create a GitHub repo (public or private) and upload the project folder contents.
 
 Do **not** commit real secrets if you can avoid it. In Render, secrets are added as Environment Variables.
 
@@ -72,8 +72,8 @@ NUMVERIFY_BASE_URL=https://apilayer.net/api/validate
 OTP_LENGTH=6
 OTP_TTL_SECONDS=300
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
-OWNER_TELEGRAM_ID=8355280769
-TELEGRAM_ALERT_CHAT_ID=-1004447057144
+OWNER_TELEGRAM_ID=your_telegram_user_id
+TELEGRAM_ALERT_CHAT_ID=your_private_group_chat_id
 ```
 
 For first test, `TELNYX_PUBLIC_KEY` can be blank. Set it later for production security.

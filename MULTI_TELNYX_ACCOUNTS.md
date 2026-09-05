@@ -21,8 +21,14 @@ For each Telnyx account:
 
 ```text
 API Version: API V2
-Webhook URL: https://1bigwilliam.up.railway.app/inbound/sms
+Webhook URL: https://YOUR-APP.up.railway.app/inbound/sms
 Webhook Failover URL: blank
+```
+
+If you are using the already-running 1BigWilliam Railway app, that webhook URL is:
+
+```text
+https://1bigwilliam.up.railway.app/inbound/sms
 ```
 
 4. Assign that account's number to that Messaging Profile.
@@ -80,8 +86,8 @@ Keep polling enabled, especially with multiple accounts:
 
 ```env
 TELNYX_POLLING_ENABLED=true
-TELNYX_POLL_INTERVAL_SECONDS=60
-TELNYX_POLL_LIMIT=20
+TELNYX_POLL_INTERVAL_SECONDS=300
+TELNYX_POLL_LIMIT=10
 TELNYX_SYNC_DATE_RANGE=
 ```
 
