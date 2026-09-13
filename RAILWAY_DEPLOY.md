@@ -5,11 +5,15 @@ Use the GitHub repo and deploy branch `main`.
 
 ## 2. Add Railway variables
 ```env
-TELNYX_API_KEY=your_telnyx_api_key
+TELNYX_API_KEYS=
+TELNYX_API_KEY=your_main_telnyx_api_key
+TELNYX_EXTRA_API_KEYS=your_extra_key_2,your_extra_key_3
 TELNYX_BASE_URL=https://api.telnyx.com/v2
 TELNYX_FROM_NUMBER=+12015550123
-TELNYX_NUMBERS=+12015550123
+TELNYX_NUMBERS=+12015550123,+12015550124,+12015550125
+TELNYX_PUBLIC_KEYS=
 TELNYX_PUBLIC_KEY=
+TELNYX_EXTRA_PUBLIC_KEYS=
 TELNYX_SIGNATURE_TOLERANCE=300
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
 OWNER_TELEGRAM_ID=your_telegram_user_id
@@ -29,12 +33,14 @@ PUBLIC_BASE_URL=https://YOUR-APP.up.railway.app python set_telegram_webhook.py
 ```
 
 ## 5. Set Telnyx webhook
-In Telnyx Messaging Profile:
+In **each** Telnyx account's Messaging Profile:
 ```text
 API Version: API V2
 Webhook URL: https://YOUR-APP.up.railway.app/inbound/sms
 Webhook Failover URL: blank
 ```
+
+All your owner-controlled Telnyx accounts can point to the same Railway webhook URL.
 
 ## 6. Test
 - open `https://YOUR-APP.up.railway.app/health`

@@ -65,10 +65,24 @@ def _first_to_number(value: Any) -> str:
     return _phone(value)
 
 
+def _configured_public_keys() -> list[str]:
+    keys: list[str] = []
+    for raw in (
+        os.getenv('TELNYX_PUBLIC_KEYS', ''),
+        os.getenv('TELNYX_PUBLIC_KEY', ''),
+        os.getenv('TELNYX_EXTRA_PUBLIC_KEYS', ''),
+    ):
+        for part in raw.replace(';', ',').replace('\n', ',').split(','):
+            key = part.strip()
+            if key and key not in keys:
+                keys.append(key)
+    return keys
+
+
 def verify_telnyx_signature(raw_body: bytes, headers) -> bool:
-    public_key_b64 = os.getenv('TELNYX_PUBLIC_KEY', '').strip()
+    public_keys = _configured_public_keys()
     tolerance = int(os.getenv('TELNYX_SIGNATURE_TOLERANCE', '300') or '300')
-    if not public_key_b64:
+    if not public_keys:
         return True
 
     signature_b64 = headers.get('telnyx-signature-ed25519') or headers.get('Telnyx-Signature-Ed25519')
@@ -87,10 +101,15 @@ def verify_telnyx_signature(raw_body: bytes, headers) -> bool:
     try:
         from nacl.exceptions import BadSignatureError
         from nacl.signing import VerifyKey
-        public_key = base64.b64decode(public_key_b64)
         signature = base64.b64decode(signature_b64)
         signed_payload = timestamp.encode('utf-8') + b'|' + raw_body
-        VerifyKey(public_key).verify(signed_payload, signature)
-        return True
-    except (ValueError, BadSignatureError, Exception):
+        for public_key_b64 in public_keys:
+            try:
+                public_key = base64.b64decode(public_key_b64)
+                VerifyKey(public_key).verify(signed_payload, signature)
+                return True
+            except (ValueError, BadSignatureError):
+                continue
+        return False
+    except Exception:
         return False
