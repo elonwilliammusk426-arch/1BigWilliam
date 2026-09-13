@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from typing import Any
 
 import requests
@@ -21,6 +22,8 @@ from telnyx_webhook import parse_telnyx_inbound_event, verify_telnyx_signature
 
 app = Flask(__name__)
 store.init_db()
+
+_sync_lock = threading.Lock()
 
 MAX_TELEGRAM_MESSAGE = 3900
 HELP_TEXT = (
@@ -171,6 +174,33 @@ def _format_available_numbers(numbers: list[dict[str, Any]], country: str, area_
     return text
 
 
+def _syncsms_summary(res) -> str:
+    text = (
+        f'Sync complete. Accounts: {res.accounts}, checked: {res.checked}, '
+        f'stored new: {res.stored}, skipped: {res.skipped}.'
+    )
+    if res.errors:
+        text += '\nErrors: ' + '; '.join(res.errors[:3])
+    return text
+
+
+def _start_background_syncsms(chat_id: int | str, limit: int) -> bool:
+    if not _sync_lock.acquire(blocking=False):
+        return False
+
+    def worker() -> None:
+        try:
+            res = sync_inbound_once(limit=limit, notify_new=True)
+            send_telegram(chat_id, _syncsms_summary(res))
+        except Exception as exc:
+            send_telegram(chat_id, f'Sync failed: {exc}')
+        finally:
+            _sync_lock.release()
+
+    threading.Thread(target=worker, name='syncsms-worker', daemon=True).start()
+    return True
+
+
 @app.get('/')
 def root():
     return jsonify({'ok': True, 'service': 'telnyx-telegram-bridge', 'health': '/health'}), 200
@@ -271,17 +301,11 @@ def telegram_webhook():
             send_telegram(chat_id, f'Could not search available numbers. Error: {exc}')
     elif command == '/syncsms':
         limit = _parse_limit(args[0] if args else None, default=20, maximum=100)
-        try:
-            res = sync_inbound_once(limit=limit, notify_new=True)
-            summary = (
-                f'Sync complete. Accounts: {res.accounts}, checked: {res.checked}, '
-                f'stored new: {res.stored}, skipped: {res.skipped}.'
-            )
-            if res.errors:
-                summary += '\nErrors: ' + '; '.join(res.errors[:3])
-            send_telegram(chat_id, summary)
-        except Exception as exc:
-            send_telegram(chat_id, f'Sync failed: {exc}')
+        started = _start_background_syncsms(chat_id, limit)
+        if started:
+            send_telegram(chat_id, f'Sync started in background for up to {limit} records per account. I will send the result when it finishes.')
+        else:
+            send_telegram(chat_id, 'A sync is already running. Wait for the result message, then try again if needed.')
     elif command == '/testalert':
         notify.notify_owner('✅ Telegram alert test successful.')
         send_telegram(chat_id, 'Sent a test alert to TELEGRAM_ALERT_CHAT_ID.')

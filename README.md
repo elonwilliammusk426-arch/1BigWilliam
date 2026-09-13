@@ -25,7 +25,7 @@ Some platforms may still refuse or block delivery to VoIP/cloud numbers.
 - `/numbers`
 - `/mynumbers`
 - `/available [country] [area] [limit]`
-- `/syncsms [limit]`
+- `/syncsms [limit]` — starts a background Telnyx pull sync and replies when finished
 - `/testalert`
 - `/whoami`
 - `/chatid`
