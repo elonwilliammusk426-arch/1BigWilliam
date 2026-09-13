@@ -16,6 +16,7 @@ Some platforms may still refuse or block delivery to VoIP/cloud numbers.
 - forwards them to Telegram
 - supports simple Telegram owner commands on `/telegram/webhook`
 - supports **one or many Telnyx accounts** pointing to the same Railway webhook URL
+- supports manual `/syncsms` pull for recent inbound SMS across your configured Telnyx accounts
 
 ## Telegram commands
 - `/help`
@@ -24,6 +25,7 @@ Some platforms may still refuse or block delivery to VoIP/cloud numbers.
 - `/numbers`
 - `/mynumbers`
 - `/available [country] [area] [limit]`
+- `/syncsms [limit]`
 - `/testalert`
 - `/whoami`
 - `/chatid`
@@ -40,6 +42,7 @@ TELNYX_PUBLIC_KEYS=
 TELNYX_PUBLIC_KEY=
 TELNYX_EXTRA_PUBLIC_KEYS=
 TELNYX_SIGNATURE_TOLERANCE=300
+TELNYX_SYNC_DATE_RANGE=
 
 TELEGRAM_BOT_TOKEN=123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 OWNER_TELEGRAM_ID=000000000

@@ -1,18 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import requests
-
-
-@dataclass
-class AvailableNumberResult:
-    phone_number: str
-    region: str
-    monthly_cost: str
-    upfront_cost: str
-    currency: str
 
 
 @dataclass
@@ -30,6 +21,30 @@ class TelnyxClient:
             'Accept': 'application/json',
             'Content-Type': 'application/json',
         })
+
+    def get_message(self, message_id: str) -> dict[str, Any]:
+        resp = self.session.get(f'{self.base_url}/messages/{message_id}', timeout=20)
+        resp.raise_for_status()
+        return resp.json()
+
+    def list_messaging_detail_records(
+        self,
+        *,
+        date_range: str | None = None,
+        direction: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {
+            'filter[record_type]': 'messaging',
+            'page[size]': max(1, min(int(limit), 100)),
+        }
+        if date_range:
+            params['filter[date_range]'] = date_range
+        if direction:
+            params['filter[direction]'] = direction
+        resp = self.session.get(f'{self.base_url}/detail_records', params=params, timeout=20)
+        resp.raise_for_status()
+        return resp.json().get('data', [])
 
     def search_available_numbers(
         self,

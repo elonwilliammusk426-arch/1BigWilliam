@@ -45,4 +45,5 @@ All your owner-controlled Telnyx accounts can point to the same Railway webhook 
 ## 6. Test
 - open `https://YOUR-APP.up.railway.app/health`
 - send `/help` to the bot
+- send `/syncsms 20` to manually pull recent inbound SMS if needed
 - send a normal SMS to your Telnyx number

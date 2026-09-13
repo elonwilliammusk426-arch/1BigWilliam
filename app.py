@@ -16,6 +16,7 @@ import notify
 import store
 from config import load_config
 from telnyx import TelnyxClient
+from telnyx_sync import sync_inbound_once
 from telnyx_webhook import parse_telnyx_inbound_event, verify_telnyx_signature
 
 app = Flask(__name__)
@@ -31,6 +32,7 @@ HELP_TEXT = (
     '• /numbers — numbers that received SMS\n'
     '• /mynumbers — configured Telnyx numbers\n'
     '• /available [country] [area] [limit] — search Telnyx SMS numbers\n'
+    '• /syncsms [limit] — pull recent inbound SMS from your Telnyx accounts\n'
     '• /testalert — send a Telegram test alert\n'
     '• /whoami — your Telegram user id\n'
     '• /chatid — this chat/group id\n\n'
@@ -267,6 +269,19 @@ def telegram_webhook():
             send_telegram(chat_id, _format_available_numbers(numbers, country, area_code))
         except Exception as exc:
             send_telegram(chat_id, f'Could not search available numbers. Error: {exc}')
+    elif command == '/syncsms':
+        limit = _parse_limit(args[0] if args else None, default=20, maximum=100)
+        try:
+            res = sync_inbound_once(limit=limit, notify_new=True)
+            summary = (
+                f'Sync complete. Accounts: {res.accounts}, checked: {res.checked}, '
+                f'stored new: {res.stored}, skipped: {res.skipped}.'
+            )
+            if res.errors:
+                summary += '\nErrors: ' + '; '.join(res.errors[:3])
+            send_telegram(chat_id, summary)
+        except Exception as exc:
+            send_telegram(chat_id, f'Sync failed: {exc}')
     elif command == '/testalert':
         notify.notify_owner('✅ Telegram alert test successful.')
         send_telegram(chat_id, 'Sent a test alert to TELEGRAM_ALERT_CHAT_ID.')
