@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 import notify
 import store
@@ -32,9 +33,36 @@ def telnyx_clients() -> list[tuple[str, TelnyxClient]]:
     return clients
 
 
+def _lookback_hours() -> int:
+    try:
+        value = int(os.getenv('TELNYX_SYNC_LOOKBACK_HOURS', '48') or '48')
+    except ValueError:
+        value = 48
+    return max(1, min(value, 24 * 30))
+
+
+def _record_is_within_window(rec: dict, hours: int) -> bool:
+    ts = (
+        rec.get('created_at')
+        or rec.get('start_time')
+        or rec.get('record_date')
+        or rec.get('occurred_at')
+        or ''
+    )
+    if not ts:
+        return False
+    try:
+        dt = datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
+    except ValueError:
+        return False
+    return dt >= datetime.now(timezone.utc) - timedelta(hours=hours)
+
+
 def sync_inbound_once(limit: int = 20, *, notify_new: bool = True) -> SyncResult:
     result = SyncResult(errors=[])
     date_range = os.getenv('TELNYX_SYNC_DATE_RANGE', '').strip() or None
+    lookback_hours = _lookback_hours()
+    store.prune_old_messages(hours=lookback_hours)
 
     for label, client in telnyx_clients():
         result.accounts += 1
@@ -49,6 +77,9 @@ def sync_inbound_once(limit: int = 20, *, notify_new: bool = True) -> SyncResult
             continue
 
         for rec in reversed(records):
+            if not _record_is_within_window(rec, lookback_hours):
+                result.skipped += 1
+                continue
             result.checked += 1
             message_id = str(rec.get('id') or '').strip()
             if not message_id:

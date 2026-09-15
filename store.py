@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 DB_PATH = 'inbound.db'
 
@@ -92,28 +92,62 @@ def _row_to_message(row: sqlite3.Row) -> InboundMessage:
     )
 
 
-def recent_all(limit: int = 10, path: str = DB_PATH) -> list[InboundMessage]:
+def _cutoff_iso(hours: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=max(1, int(hours)))).isoformat()
+
+
+def prune_old_messages(hours: int = 48, path: str = DB_PATH) -> int:
     init_db(path)
+    cutoff = _cutoff_iso(hours)
+    with sqlite3.connect(path) as conn:
+        cur = conn.execute('DELETE FROM inbound WHERE received_at < ?', (cutoff,))
+        return int(cur.rowcount or 0)
+
+
+def recent_all(limit: int = 10, path: str = DB_PATH, max_age_hours: int | None = None) -> list[InboundMessage]:
+    init_db(path)
+    query = 'SELECT * FROM inbound'
+    params: list[object] = []
+    if max_age_hours:
+        query += ' WHERE received_at >= ?'
+        params.append(_cutoff_iso(max_age_hours))
+    query += ' ORDER BY id DESC LIMIT ?'
+    params.append(max(1, min(int(limit), 100)))
     with sqlite3.connect(path) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute('SELECT * FROM inbound ORDER BY id DESC LIMIT ?', (max(1, min(int(limit), 100)),)).fetchall()
+        rows = conn.execute(query, params).fetchall()
     return [_row_to_message(r) for r in rows]
 
 
-def recent_for_number(to_number: str, limit: int = 20, path: str = DB_PATH) -> list[InboundMessage]:
+def recent_for_number(
+    to_number: str,
+    limit: int = 20,
+    path: str = DB_PATH,
+    max_age_hours: int | None = None,
+) -> list[InboundMessage]:
     init_db(path)
+    query = 'SELECT * FROM inbound WHERE to_number = ?'
+    params: list[object] = [to_number]
+    if max_age_hours:
+        query += ' AND received_at >= ?'
+        params.append(_cutoff_iso(max_age_hours))
+    query += ' ORDER BY id DESC LIMIT ?'
+    params.append(max(1, min(int(limit), 100)))
     with sqlite3.connect(path) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            'SELECT * FROM inbound WHERE to_number = ? ORDER BY id DESC LIMIT ?',
-            (to_number, max(1, min(int(limit), 100))),
-        ).fetchall()
+        rows = conn.execute(query, params).fetchall()
     return [_row_to_message(r) for r in rows]
 
 
-def distinct_to_numbers(path: str = DB_PATH) -> list[str]:
+def distinct_to_numbers(path: str = DB_PATH, max_age_hours: int | None = None) -> list[str]:
     init_db(path)
+    query = 'SELECT DISTINCT to_number FROM inbound'
+    params: list[object] = []
+    if max_age_hours:
+        query += ' WHERE received_at >= ?'
+        params.append(_cutoff_iso(max_age_hours))
+    query += ' ORDER BY to_number'
     with sqlite3.connect(path) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute('SELECT DISTINCT to_number FROM inbound ORDER BY to_number').fetchall()
+        rows = conn.execute(query, params).fetchall()
     return [str(r['to_number']) for r in rows]

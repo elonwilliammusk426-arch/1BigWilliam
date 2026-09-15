@@ -52,6 +52,14 @@ def _owner_id() -> int:
     return int(os.getenv('OWNER_TELEGRAM_ID', '0') or '0')
 
 
+def _lookback_hours() -> int:
+    try:
+        value = int(os.getenv('TELNYX_SYNC_LOOKBACK_HOURS', '48') or '48')
+    except ValueError:
+        value = 48
+    return max(1, min(value, 24 * 30))
+
+
 def _configured_numbers() -> list[str]:
     values = []
     for raw in [os.getenv('TELNYX_FROM_NUMBER', ''), os.getenv('TELNYX_NUMBERS', '')]:
@@ -113,7 +121,7 @@ def _parse_limit(value: str | None, default: int, maximum: int = 50) -> int:
 
 def _format_messages(messages: list[store.InboundMessage]) -> str:
     if not messages:
-        return 'No inbound messages yet.'
+        return f'No inbound messages in the last {_lookback_hours()} hours.'
     lines: list[str] = []
     for m in messages:
         lines.append(
@@ -176,7 +184,7 @@ def _format_available_numbers(numbers: list[dict[str, Any]], country: str, area_
 
 def _syncsms_summary(res) -> str:
     text = (
-        f'Sync complete. Accounts: {res.accounts}, checked: {res.checked}, '
+        f'Sync complete for the last {_lookback_hours()} hours. Accounts: {res.accounts}, checked: {res.checked}, '
         f'stored new: {res.stored}, skipped: {res.skipped}.'
     )
     if res.errors:
@@ -203,16 +211,17 @@ def _start_background_syncsms(chat_id: int | str, limit: int) -> bool:
 
 @app.get('/')
 def root():
-    return jsonify({'ok': True, 'service': 'telnyx-telegram-bridge', 'health': '/health'}), 200
+    return jsonify({'ok': True, 'service': 'telnyx-telegram-bridge', 'health': '/health', 'sync_window_hours': _lookback_hours()}), 200
 
 
 @app.get('/health')
 def health():
-    return jsonify({'ok': True, 'service': 'telnyx-telegram-bridge'}), 200
+    return jsonify({'ok': True, 'service': 'telnyx-telegram-bridge', 'sync_window_hours': _lookback_hours()}), 200
 
 
 @app.post('/inbound/sms')
 def inbound_sms():
+    store.prune_old_messages(hours=_lookback_hours())
     raw_body = request.get_data()
     if not verify_telnyx_signature(raw_body, request.headers):
         return jsonify({'ok': False, 'error': 'invalid_signature'}), 403
@@ -272,21 +281,23 @@ def telegram_webhook():
         send_telegram(chat_id, '🚫 Unauthorized.')
         return jsonify({'ok': True, 'unauthorized': True}), 200
 
+    store.prune_old_messages(hours=_lookback_hours())
+
     if command in {'/start', '/help'}:
-        send_telegram(chat_id, HELP_TEXT)
+        send_telegram(chat_id, HELP_TEXT + f'\n\nWindow: only the last {_lookback_hours()} hours are shown/synced.')
     elif command == '/latest':
         limit = _parse_limit(args[0] if args else None, default=10)
-        send_telegram(chat_id, _format_messages(store.recent_all(limit=limit)))
+        send_telegram(chat_id, _format_messages(store.recent_all(limit=limit, max_age_hours=_lookback_hours())))
     elif command == '/recent':
         if not args:
             send_telegram(chat_id, 'Usage: /recent +12015550123 [limit]')
         else:
             number = args[0]
             limit = _parse_limit(args[1] if len(args) > 1 else None, default=20)
-            send_telegram(chat_id, _format_messages(store.recent_for_number(number, limit=limit)))
+            send_telegram(chat_id, _format_messages(store.recent_for_number(number, limit=limit, max_age_hours=_lookback_hours())))
     elif command == '/numbers':
-        numbers = store.distinct_to_numbers()
-        send_telegram(chat_id, 'Numbers with inbound SMS:\n' + '\n'.join(numbers) if numbers else 'No numbers with messages yet.')
+        numbers = store.distinct_to_numbers(max_age_hours=_lookback_hours())
+        send_telegram(chat_id, 'Numbers with inbound SMS in the current window:\n' + '\n'.join(numbers) if numbers else f'No numbers with messages in the last {_lookback_hours()} hours.')
     elif command == '/mynumbers':
         numbers = _configured_numbers()
         send_telegram(chat_id, 'Configured Telnyx numbers:\n' + '\n'.join(numbers) if numbers else 'No configured numbers yet.')
