@@ -17,6 +17,9 @@ TELNYX_EXTRA_PUBLIC_KEYS=
 TELNYX_SIGNATURE_TOLERANCE=300
 TELNYX_SYNC_LOOKBACK_HOURS=48
 TELNYX_SYNC_DATE_RANGE=
+TELNYX_POLLING_ENABLED=true
+TELNYX_POLL_INTERVAL_SECONDS=60
+TELNYX_POLL_LIMIT=20
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
 OWNER_TELEGRAM_ID=your_telegram_user_id
 TELEGRAM_ALERT_CHAT_ID=your_private_group_chat_id
@@ -26,7 +29,7 @@ PUBLIC_BASE_URL=https://YOUR-APP.up.railway.app
 ## 3. Deploy
 Railway start command:
 ```bash
-gunicorn app:app --bind 0.0.0.0:$PORT --workers 1
+gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120
 ```
 
 ## 4. Set Telegram webhook

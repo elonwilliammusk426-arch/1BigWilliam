@@ -146,3 +146,29 @@ def sync_inbound_once(limit: int = 20, *, notify_new: bool = True) -> SyncResult
                 result.errors.append(f'{label}:{message_id}: {exc}')
 
     return result
+
+
+def start_polling_if_enabled() -> None:
+    enabled = os.getenv('TELNYX_POLLING_ENABLED', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+    if not enabled:
+        return
+
+    try:
+        interval = int(os.getenv('TELNYX_POLL_INTERVAL_SECONDS', '60') or '60')
+    except ValueError:
+        interval = 60
+    try:
+        limit = int(os.getenv('TELNYX_POLL_LIMIT', '20') or '20')
+    except ValueError:
+        limit = 20
+
+    def loop() -> None:
+        time.sleep(5)
+        while True:
+            try:
+                sync_inbound_once(limit=limit, notify_new=True)
+            except Exception as exc:
+                notify.notify_owner(f'⚠️ Background Telnyx sync error: {exc}')
+            time.sleep(max(15, interval))
+
+    threading.Thread(target=loop, name='telnyx-poll-sync', daemon=True).start()

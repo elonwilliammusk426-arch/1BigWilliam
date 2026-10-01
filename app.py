@@ -17,11 +17,12 @@ import notify
 import store
 from config import load_config
 from telnyx import TelnyxClient
-from telnyx_sync import sync_inbound_once
+from telnyx_sync import start_polling_if_enabled, sync_inbound_once
 from telnyx_webhook import parse_telnyx_inbound_event, verify_telnyx_signature
 
 app = Flask(__name__)
 store.init_db()
+start_polling_if_enabled()
 
 _sync_lock = threading.Lock()
 

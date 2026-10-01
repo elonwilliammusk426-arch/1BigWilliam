@@ -17,6 +17,7 @@ Some platforms may still refuse or block delivery to VoIP/cloud numbers.
 - supports simple Telegram owner commands on `/telegram/webhook`
 - supports **one or many Telnyx accounts** pointing to the same Railway webhook URL
 - supports manual `/syncsms` pull for recent inbound SMS across your configured Telnyx accounts
+- supports optional background polling fallback so new SMS can still auto-drop without pressing `/syncsms`
 - sync/display window defaults to the last `48` hours so older codes do not keep reappearing
 
 ## Telegram commands
