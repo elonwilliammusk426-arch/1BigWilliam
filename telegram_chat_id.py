@@ -17,19 +17,36 @@ def main() -> int:
     if not token:
         print('Set TELEGRAM_BOT_TOKEN first.', file=sys.stderr)
         return 1
-    resp = requests.get(f'https://api.telegram.org/bot{token}/getUpdates', timeout=20)
-    resp.raise_for_status()
-    data = resp.json()
-    if not data.get('ok'):
-        print(data)
+    try:
+        response = requests.get(f'https://api.telegram.org/bot{token}/getUpdates', timeout=20)
+    except requests.RequestException as exc:
+        # Do not print the exception: its URL may contain the bot token.
+        print(f'Telegram request failed: {type(exc).__name__}', file=sys.stderr)
+        return 1
+    if response.status_code == 409:
+        print('Telegram getUpdates is unavailable while a webhook is active (or another poller is running). '
+              'With a working webhook, send /whoami or /chatid to the bot instead.', file=sys.stderr)
+        return 1
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+    if not response.ok or not isinstance(data, dict) or data.get('ok') is not True or not isinstance(data.get('result'), list):
+        print(f'Telegram could not retrieve updates (HTTP {response.status_code}).', file=sys.stderr)
         return 1
     seen = set()
-    for upd in data.get('result', []):
-        msg = upd.get('message') or upd.get('channel_post') or {}
-        chat = msg.get('chat', {})
-        user = msg.get('from', {})
+    for update in data['result']:
+        if not isinstance(update, dict):
+            continue
+        msg = update.get('message') or update.get('channel_post') or {}
+        if not isinstance(msg, dict):
+            continue
+        chat = msg.get('chat') or {}
+        user = msg.get('from') or {}
+        if not isinstance(chat, dict) or not isinstance(user, dict):
+            continue
         chat_id = chat.get('id')
-        if not chat_id or chat_id in seen:
+        if type(chat_id) is not int or not chat_id or chat_id in seen:
             continue
         seen.add(chat_id)
         print('---')
