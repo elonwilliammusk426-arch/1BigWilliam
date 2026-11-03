@@ -66,11 +66,14 @@ def _record_timestamp(rec: dict[str, Any]) -> datetime | None:
         return None
     try:
         dt = datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
-    except ValueError:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
         return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+    # Match the webhook parser's small clock-skew allowance. A far-future
+    # timestamp cannot establish that a record belongs in the lookback window.
+    return dt if dt <= datetime.now(timezone.utc) + timedelta(minutes=5) else None
 
 
 def _record_is_within_window(rec: dict[str, Any], hours: int) -> bool:

@@ -37,6 +37,7 @@ def init_db(path: str = DB_PATH) -> None:
                 from_number TEXT NOT NULL,
                 body TEXT NOT NULL,
                 received_at TEXT NOT NULL,
+                retention_at TEXT,
                 provider_message_id TEXT,
                 notification_state TEXT NOT NULL DEFAULT 'sent',
                 notification_claim_token TEXT,
@@ -49,6 +50,8 @@ def init_db(path: str = DB_PATH) -> None:
         cols = {r[1] for r in conn.execute('PRAGMA table_info(inbound)').fetchall()}
         if 'provider_message_id' not in cols:
             conn.execute('ALTER TABLE inbound ADD COLUMN provider_message_id TEXT')
+        if 'retention_at' not in cols:
+            conn.execute('ALTER TABLE inbound ADD COLUMN retention_at TEXT')
         # Existing messages predate delivery tracking. Mark them as sent rather
         # than replaying potentially stale codes after an upgrade.
         if 'notification_state' not in cols:
@@ -63,6 +66,7 @@ def init_db(path: str = DB_PATH) -> None:
             conn.execute('ALTER TABLE inbound ADD COLUMN notification_attempts INTEGER NOT NULL DEFAULT 0')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_to_number ON inbound(to_number)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_received_at ON inbound(received_at)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_retention_at ON inbound(COALESCE(retention_at, received_at))')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_pending_notifications ON inbound(notification_state, notification_claimed_at)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_notification_retry ON inbound(notification_state, notification_retry_at)')
         conn.execute(
@@ -136,6 +140,12 @@ def has_complete_telnyx_message(message_id: str, path: str = DB_PATH) -> bool:
         return bool(row and row[1] not in INCOMPLETE_BODIES)
 
 
+def _utc_iso(timestamp: datetime) -> str:
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return timestamp.astimezone(timezone.utc).isoformat()
+
+
 def save_telnyx_message(
     to_number: str,
     from_number: str,
@@ -144,21 +154,21 @@ def save_telnyx_message(
     message_id: str | None,
     notify: bool = True,
     received_at: datetime | None = None,
+    retention_at: datetime | None = None,
     path: str = DB_PATH,
 ) -> tuple[int, bool]:
     """Store one Telnyx message and queue its alert in the same transaction.
 
     The provider's message UUID is shared by webhook and sync paths. Older
     releases used an account/key-dependent prefix; recognize it to avoid
-    replaying already-synced messages after an upgrade.
+    replaying already-synced messages after an upgrade. Webhooks can specify
+    a separate retention time so late events are retained from bridge arrival.
     """
     init_db(path)
     message_id = str(message_id or '').strip()
     provider_key = f'telnyx:{message_id}' if message_id else None
-    timestamp = received_at or datetime.now(timezone.utc)
-    if timestamp.tzinfo is None:
-        timestamp = timestamp.replace(tzinfo=timezone.utc)
-    timestamp_text = timestamp.astimezone(timezone.utc).isoformat()
+    timestamp_text = _utc_iso(received_at or datetime.now(timezone.utc))
+    retention_text = _utc_iso(retention_at) if retention_at is not None else None
 
     with sqlite3.connect(path) as conn:
         # Serialize the lookup/insert across the webhook and polling threads.
@@ -173,17 +183,19 @@ def save_telnyx_message(
                     state = 'pending' if notify else row[2]
                     conn.execute(
                         'UPDATE inbound SET to_number = ?, from_number = ?, body = ?, '
+                        'received_at = COALESCE(?, received_at), retention_at = COALESCE(?, retention_at), '
                         'notification_state = ?, notification_claim_token = NULL, '
                         'notification_claimed_at = NULL, notification_retry_at = NULL, '
                         'notification_attempts = 0 WHERE id = ?',
-                        (to_number, from_number, body, state, row[0]),
+                        (to_number, from_number, body, timestamp_text if received_at is not None else None,
+                         retention_text, state, row[0]),
                     )
                     return int(row[0]), True
                 return int(row[0]), False
         cur = conn.execute(
-            'INSERT INTO inbound (to_number, from_number, body, received_at, '
-            'provider_message_id, notification_state) VALUES (?, ?, ?, ?, ?, ?)',
-            (to_number, from_number, body, timestamp_text, provider_key,
+            'INSERT INTO inbound (to_number, from_number, body, received_at, retention_at, '
+            'provider_message_id, notification_state) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            (to_number, from_number, body, timestamp_text, retention_text, provider_key,
              'pending' if notify else 'sent'),
         )
         return int(cur.lastrowid), True
@@ -259,7 +271,7 @@ def prune_old_messages(hours: int = 48, path: str = DB_PATH) -> int:
     init_db(path)
     cutoff = _cutoff_iso(hours)
     with sqlite3.connect(path) as conn:
-        cur = conn.execute('DELETE FROM inbound WHERE received_at < ?', (cutoff,))
+        cur = conn.execute('DELETE FROM inbound WHERE COALESCE(retention_at, received_at) < ?', (cutoff,))
         return int(cur.rowcount or 0)
 
 
@@ -268,7 +280,7 @@ def recent_all(limit: int = 10, path: str = DB_PATH, max_age_hours: int | None =
     query = 'SELECT * FROM inbound'
     params: list[object] = []
     if max_age_hours:
-        query += ' WHERE received_at >= ?'
+        query += ' WHERE COALESCE(retention_at, received_at) >= ?'
         params.append(_cutoff_iso(max_age_hours))
     query += ' ORDER BY received_at DESC, id DESC LIMIT ?'
     params.append(max(1, min(int(limit), 100)))
@@ -288,7 +300,7 @@ def recent_for_number(
     query = 'SELECT * FROM inbound WHERE to_number = ?'
     params: list[object] = [to_number]
     if max_age_hours:
-        query += ' AND received_at >= ?'
+        query += ' AND COALESCE(retention_at, received_at) >= ?'
         params.append(_cutoff_iso(max_age_hours))
     query += ' ORDER BY received_at DESC, id DESC LIMIT ?'
     params.append(max(1, min(int(limit), 100)))
@@ -303,7 +315,7 @@ def distinct_to_numbers(path: str = DB_PATH, max_age_hours: int | None = None) -
     query = 'SELECT DISTINCT to_number FROM inbound'
     params: list[object] = []
     if max_age_hours:
-        query += ' WHERE received_at >= ?'
+        query += ' WHERE COALESCE(retention_at, received_at) >= ?'
         params.append(_cutoff_iso(max_age_hours))
     query += ' ORDER BY to_number'
     with sqlite3.connect(path) as conn:

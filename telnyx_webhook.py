@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 try:
@@ -42,6 +43,30 @@ def parse_telnyx_inbound_event(event: dict[str, Any]) -> tuple[str, str, str, st
             message_id = candidate.get('id') or candidate.get('uuid')
             if from_number and to_number:
                 return to_number, from_number, body, message_id
+    return None
+
+
+def inbound_received_at(event: dict[str, Any]) -> datetime | None:
+    """Use Telnyx's receive time, falling back to its event time if necessary."""
+    data = event.get('data') if isinstance(event, dict) else None
+    data = data if isinstance(data, dict) else {}
+    payload = data.get('payload')
+    payload = payload if isinstance(payload, dict) else {}
+    now = datetime.now(timezone.utc)
+    for value in (payload.get('received_at'), data.get('occurred_at')):
+        if not isinstance(value, str) or len(value) > 100:
+            continue
+        try:
+            timestamp = datetime.fromisoformat(value.strip().replace('Z', '+00:00'))
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            timestamp = timestamp.astimezone(timezone.utc)
+        except (ValueError, OverflowError):
+            continue
+        # A bad future timestamp must not keep a message indefinitely or make
+        # an older SMS appear newer. Allow small provider clock differences.
+        if timestamp <= now + timedelta(minutes=5):
+            return timestamp
     return None
 
 

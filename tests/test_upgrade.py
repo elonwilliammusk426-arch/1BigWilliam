@@ -201,6 +201,123 @@ class TelnyxSecurityTests(DatabaseTestCase):
                     self.assertFalse(telnyx_webhook.verify_telnyx_signature(b'{}', {}))
 
 
+class WebhookTimestampTests(DatabaseTestCase):
+    def test_out_of_order_webhooks_are_sorted_by_provider_receive_time(self):
+        now = datetime.now(timezone.utc)
+        recent, older = webhook('recent'), webhook('older')
+        recent['data']['payload']['received_at'] = (now - timedelta(minutes=2)).isoformat()
+        older['data']['payload']['received_at'] = (now - timedelta(hours=2)).isoformat()
+        with bridge_app.app.test_client() as client:
+            self.assertEqual(client.post('/inbound/sms', json=recent).status_code, 200)
+            self.assertEqual(client.post('/inbound/sms', json=older).status_code, 200)
+        self.assertEqual([m.provider_message_id for m in store.recent_all()], ['telnyx:recent', 'telnyx:older'])
+        self.assertEqual(datetime.fromisoformat(store.recent_all()[1].received_at), now - timedelta(hours=2))
+
+    def test_invalid_receive_time_falls_back_to_the_event_timestamp(self):
+        now = datetime.now(timezone.utc)
+        event = webhook('fallback')
+        event['data']['payload']['received_at'] = 'invalid'
+        event['data']['occurred_at'] = (now - timedelta(minutes=10)).isoformat()
+        with bridge_app.app.test_client() as client:
+            self.assertEqual(client.post('/inbound/sms', json=event).status_code, 200)
+        self.assertEqual(datetime.fromisoformat(store.recent_all()[0].received_at), now - timedelta(minutes=10))
+
+    def test_missing_invalid_or_far_future_timestamps_use_bridge_arrival_time(self):
+        before = datetime.now(timezone.utc)
+        with bridge_app.app.test_client() as client:
+            for name, value in (
+                ('missing', None),
+                ('invalid', 'not-an-iso-date'),
+                ('future', (before + timedelta(days=30)).isoformat()),
+            ):
+                event = webhook(name)
+                event['data']['payload']['received_at'] = value
+                self.assertEqual(client.post('/inbound/sms', json=event).status_code, 200)
+        after = datetime.now(timezone.utc)
+        for message_row in store.recent_all():
+            timestamp = datetime.fromisoformat(message_row.received_at)
+            self.assertLessEqual(before, timestamp)
+            self.assertLessEqual(timestamp, after)
+
+    def test_utc_suffix_and_timezone_offsets_are_normalized(self):
+        now = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(minutes=5)
+        event = webhook('utc')
+        event['data']['payload']['received_at'] = now.isoformat().replace('+00:00', 'Z')
+        with bridge_app.app.test_client() as client:
+            self.assertEqual(client.post('/inbound/sms', json=event).status_code, 200)
+        self.assertEqual(datetime.fromisoformat(store.recent_all()[0].received_at), now)
+        offset = timezone(timedelta(hours=-4))
+        event = webhook('offset')
+        event['data']['payload']['received_at'] = now.astimezone(offset).isoformat()
+        with bridge_app.app.test_client() as client:
+            self.assertEqual(client.post('/inbound/sms', json=event).status_code, 200)
+        self.assertEqual(datetime.fromisoformat(store.recent_all()[0].received_at), now)
+
+    def test_late_webhook_is_queued_and_retained_from_bridge_arrival(self):
+        older = datetime.now(timezone.utc) - timedelta(hours=49)
+        event = webhook('late')
+        event['data']['payload']['received_at'] = older.isoformat()
+        with bridge_app.app.test_client() as client:
+            result = client.post('/inbound/sms', json=event)
+        self.assertEqual(result.status_code, 200)
+        self.assertFalse(result.json['duplicate'])
+        rows = store.recent_all(max_age_hours=48)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(datetime.fromisoformat(rows[0].received_at), older)
+        self.assertEqual(len(store.recent_for_number(rows[0].to_number, max_age_hours=48)), 1)
+        self.assertIn(rows[0].to_number, store.distinct_to_numbers(max_age_hours=48))
+        self.assertEqual(store.pending_notification_count(), 1)
+        with mock.patch.object(notify, 'notify_owner', return_value=True) as send:
+            self.assertEqual(alerts.deliver_pending(), 1)
+        send.assert_called_once()
+        with sqlite3.connect('inbound.db') as conn:
+            conn.execute("UPDATE inbound SET retention_at = '2000-01-01T00:00:00+00:00'")
+        self.assertEqual(store.recent_all(max_age_hours=48), [])
+        self.assertEqual(store.recent_for_number(rows[0].to_number, max_age_hours=48), [])
+        self.assertEqual(store.distinct_to_numbers(max_age_hours=48), [])
+        self.assertEqual(store.prune_old_messages(hours=48), 1)
+        self.assertEqual(store.recent_all(), [])
+
+    def test_duplicate_webhook_does_not_extend_retention(self):
+        event = webhook('duplicate')
+        with bridge_app.app.test_client() as client:
+            self.assertFalse(client.post('/inbound/sms', json=event).json['duplicate'])
+            retention = (datetime.now(timezone.utc) - timedelta(hours=47)).isoformat()
+            with sqlite3.connect('inbound.db') as conn:
+                conn.execute('UPDATE inbound SET retention_at = ?', (retention,))
+            self.assertTrue(client.post('/inbound/sms', json=event).json['duplicate'])
+        with sqlite3.connect('inbound.db') as conn:
+            stored_retention = conn.execute('SELECT retention_at FROM inbound').fetchone()[0]
+        self.assertEqual(stored_retention, retention)
+
+    def test_sync_enrichment_preserves_a_webhooks_retention_time(self):
+        old = datetime.now(timezone.utc) - timedelta(hours=49)
+        event = webhook('enriched')
+        event['data']['payload']['text'] = ''
+        event['data']['payload']['received_at'] = old.isoformat()
+        with bridge_app.app.test_client() as client:
+            self.assertFalse(client.post('/inbound/sms', json=event).json['duplicate'])
+        with sqlite3.connect('inbound.db') as conn:
+            retention = conn.execute('SELECT retention_at FROM inbound').fetchone()[0]
+        store.save_telnyx_message('to', 'from', 'recovered', message_id='enriched', received_at=old)
+        with sqlite3.connect('inbound.db') as conn:
+            self.assertEqual(conn.execute('SELECT retention_at FROM inbound').fetchone()[0], retention)
+        with mock.patch.object(notify, 'notify_owner', return_value=True):
+            self.assertEqual(alerts.deliver_pending(), 1)
+
+    def test_enrichment_updates_a_known_provider_timestamp_but_not_an_unknown_one(self):
+        old = datetime.now(timezone.utc) - timedelta(hours=3)
+        corrected = old + timedelta(hours=1)
+        store.save_telnyx_message('to', 'from', '', message_id='one', received_at=old)
+        store.save_telnyx_message('to', 'from', 'body', message_id='one', received_at=corrected)
+        self.assertEqual(datetime.fromisoformat(store.recent_all()[0].received_at), corrected)
+
+        store.save_telnyx_message('to', 'from', '', message_id='two', received_at=old)
+        store.save_telnyx_message('to', 'from', 'body', message_id='two')
+        rows = {row.provider_message_id: row for row in store.recent_all()}
+        self.assertEqual(datetime.fromisoformat(rows['telnyx:two'].received_at), old)
+
+
 class SetupUtilitiesTests(DatabaseTestCase):
     def test_registration_preserves_updates_and_registers_secret(self):
         out, err = io.StringIO(), io.StringIO()
@@ -354,6 +471,18 @@ class SyncUpgradeTests(DatabaseTestCase):
         self.assertIn('request timed out', result.errors[0])
         self.assertEqual(store.recent_all()[0].body, 'ready from detail record')
 
+    def test_invalid_or_far_future_record_timestamps_do_not_abort_an_account(self):
+        overflow = record('overflow')
+        overflow['created_at'] = '0001-01-01T00:00:00+23:59'
+        future = record('future')
+        future['created_at'] = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+        client = FakeTelnyx([overflow, future, record('valid')], {'valid': message('valid')})
+        with mock.patch.object(telnyx_sync, 'telnyx_clients', return_value=[('acct1', client)]):
+            result = telnyx_sync.sync_inbound_once()
+        self.assertEqual((result.stored, result.missing_timestamps, result.skipped), (1, 2, 2))
+        self.assertEqual(result.errors, [])
+        self.assertEqual(store.recent_all()[0].body, 'valid')
+
     def test_recovery_processes_newest_records_first(self):
         client = FakeTelnyx([record('newest'), record('older', age=1)], {
             'newest': message('newest'), 'older': message('older'),
@@ -467,6 +596,7 @@ class RetryUpgradeTests(DatabaseTestCase):
             columns = {row[1] for row in conn.execute('PRAGMA table_info(inbound)')}
             rows = conn.execute('SELECT notification_state,notification_retry_at,notification_attempts FROM inbound ORDER BY id').fetchall()
         self.assertIn('notification_retry_at', columns)
+        self.assertIn('retention_at', columns)
         self.assertIn('notification_attempts', columns)
         self.assertEqual(rows, [('sent', None, 0), ('pending', None, 0)])
         claim = store.claim_next_notification('previous.db')

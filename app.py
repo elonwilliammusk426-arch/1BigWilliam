@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import threading
+from datetime import datetime, timezone
 from typing import Any
 
 from flask import Flask, jsonify, request
@@ -20,7 +21,8 @@ from config import configured_telnyx_api_keys, load_config, sync_lookback_hours
 from telnyx import MAX_DETAIL_RECORDS, TelnyxClient
 from telnyx_sync import _safe_error, start_polling_if_enabled, sync_inbound_once
 from telnyx_webhook import (
-    _configured_public_keys, parse_telnyx_inbound_event, signature_required, verify_telnyx_signature,
+    _configured_public_keys, inbound_received_at, parse_telnyx_inbound_event, signature_required,
+    verify_telnyx_signature,
 )
 
 app = Flask(__name__)
@@ -273,7 +275,10 @@ def inbound_sms():
     to_number, from_number, body, message_id = parsed
     row_id, created = store.save_telnyx_message(
         to_number=to_number, from_number=from_number, body=body,
-        message_id=message_id, notify=True,
+        message_id=message_id, notify=True, received_at=inbound_received_at(event),
+        # Even an old provider event is a new delivery to the bridge. Retain it
+        # from arrival so it can be alerted instead of being pruned immediately.
+        retention_at=datetime.now(timezone.utc),
     )
     alerts.wake_delivery_worker()
     # Acknowledge quickly after the SMS and its alert have been stored. Telegram

@@ -4,7 +4,7 @@ These steps describe a deployment; making repository changes alone does not depl
 
 ## 1. Prepare and configure
 
-Connect the intended GitHub branch in Railway. Keep **one replica and one Gunicorn worker**. The checked-in Nixpacks configuration uses Python 3.11 via `.python-version`; `NIXPACKS_PYTHON_VERSION` can override it.
+Connect the intended GitHub branch in Railway. Keep **one replica and one Gunicorn worker**, using the four request threads in the start command below. This lets incoming webhooks proceed while an owner command waits on a provider. The checked-in Nixpacks configuration uses Python 3.11 via `.python-version`; `NIXPACKS_PYTHON_VERSION` can override it.
 
 Set the following Railway variables to your own values (never commit or share them):
 
@@ -41,16 +41,16 @@ For existing bots, register the new Telegram secret **before** deploying the new
 
 ## 2. Persistent storage and background work
 
-Railway container filesystems are ephemeral. To persist the inbox, alert queue and deduplication state, attach a volume at `/data` and set `INBOUND_DB_PATH=/data/inbound.db`. Changing the path does not migrate an existing database: back it up and safely copy/restore it first, stopping writes or using SQLite's online backup API. The DB and backups contain SMS text; restrict access.
+Railway container filesystems are ephemeral. Back up an existing database before upgrading; the app automatically adds missing columns and indexes on startup. To persist the inbox, alert queue and deduplication state, attach a volume at `/data` and set `INBOUND_DB_PATH=/data/inbound.db`. Changing the path does not migrate an existing database: safely copy/restore the backup first, stopping writes or using SQLite's online backup API. The DB and backups contain SMS text; restrict access.
 
 Disable Railway Serverless/app sleeping if polling and retries must continue while there is no incoming traffic. Messages and pending alerts are pruned after the configured lookback (48 hours by default).
 
 ## 3. Deploy and register webhooks
 
-The repository's start command is:
+The repository's start command is shown below. If Railway has a custom start-command override, update it too; otherwise the old single-request worker can block webhooks while a provider call is slow. The zero keep-alive timeout limits idle HTTP connections, which can otherwise delay a graceful worker shutdown.
 
 ```bash
-gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120
+gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --worker-class gthread --threads 4 --timeout 120 --keep-alive 0
 ```
 
 Using the same bot token and Telegram webhook secret as Railway, run the setup utility with `PUBLIC_BASE_URL` set to the deployed HTTPS base URL:
