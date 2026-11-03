@@ -28,6 +28,22 @@ def _split_csv(raw: str) -> tuple[str, ...]:
     return tuple(items)
 
 
+def sync_lookback_hours() -> int:
+    try:
+        value = int(os.getenv('TELNYX_SYNC_LOOKBACK_HOURS', '48') or '48')
+    except ValueError:
+        value = 48
+    return max(1, min(value, 24 * 30))
+
+
+def configured_telnyx_api_keys() -> tuple[str, ...]:
+    return _split_csv(','.join(filter(None, [
+        os.getenv('TELNYX_API_KEYS', ''),
+        os.getenv('TELNYX_API_KEY', ''),
+        os.getenv('TELNYX_EXTRA_API_KEYS', ''),
+    ])))
+
+
 def load_config(env_file: str = '.env') -> Config:
     try:
         from dotenv import load_dotenv
@@ -35,11 +51,7 @@ def load_config(env_file: str = '.env') -> Config:
     except ImportError:
         pass
 
-    api_keys = _split_csv(','.join(filter(None, [
-        os.getenv('TELNYX_API_KEYS', ''),
-        os.getenv('TELNYX_API_KEY', ''),
-        os.getenv('TELNYX_EXTRA_API_KEYS', ''),
-    ])))
+    api_keys = configured_telnyx_api_keys()
     if not api_keys:
         raise RuntimeError('Missing TELNYX_API_KEY')
 
@@ -51,6 +63,13 @@ def load_config(env_file: str = '.env') -> Config:
         os.getenv('TELNYX_EXTRA_PUBLIC_KEYS', ''),
     ])))
 
+    try:
+        signature_tolerance = int(os.getenv('TELNYX_SIGNATURE_TOLERANCE', '300') or '300')
+    except ValueError:
+        # Sync does not use this setting; webhook verification separately
+        # rejects invalid tolerances rather than disabling signature checks.
+        signature_tolerance = 300
+
     return Config(
         telnyx_api_key=api_keys[0],
         telnyx_api_keys=api_keys,
@@ -59,7 +78,7 @@ def load_config(env_file: str = '.env') -> Config:
         telnyx_numbers=all_numbers,
         telnyx_public_key=public_keys[0] if public_keys else '',
         telnyx_public_keys=public_keys,
-        telnyx_signature_tolerance=int(os.getenv('TELNYX_SIGNATURE_TOLERANCE', '300') or '300'),
+        telnyx_signature_tolerance=signature_tolerance,
         telegram_bot_token=os.getenv('TELEGRAM_BOT_TOKEN', '').strip(),
         owner_telegram_id=os.getenv('OWNER_TELEGRAM_ID', '').strip(),
         telegram_alert_chat_id=(os.getenv('TELEGRAM_ALERT_CHAT_ID', '').strip() or os.getenv('OWNER_TELEGRAM_ID', '').strip()),

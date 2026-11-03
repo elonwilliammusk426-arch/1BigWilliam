@@ -6,6 +6,24 @@ from typing import Any
 import requests
 
 
+MAX_DETAIL_RECORDS = 500
+DETAIL_PAGE_SIZE = 100
+MAX_DETAIL_PAGES = 10
+
+
+class PaginationLimitError(Exception):
+    """The provider has more pages than this bounded sync is allowed to fetch."""
+
+
+class PartialDetailRecordsError(Exception):
+    """A later page failed; preserve already fetched records for processing."""
+
+    def __init__(self, records: list[dict[str, Any]], cause: Exception) -> None:
+        super().__init__('Could not retrieve all requested detail-record pages')
+        self.records = records
+        self.cause = cause
+
+
 @dataclass
 class TelnyxClient:
     api_key: str
@@ -34,17 +52,49 @@ class TelnyxClient:
         direction: str | None = None,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
+        target = max(1, min(int(limit), MAX_DETAIL_RECORDS))
+        page_size = min(target, DETAIL_PAGE_SIZE)
         params: dict[str, Any] = {
             'filter[record_type]': 'messaging',
-            'page[size]': max(1, min(int(limit), 100)),
+            'page[size]': page_size,
+            'sort': '-created_at',
         }
         if date_range:
             params['filter[date_range]'] = date_range
         if direction:
             params['filter[direction]'] = direction
-        resp = self.session.get(f'{self.base_url}/detail_records', params=params, timeout=20)
-        resp.raise_for_status()
-        return resp.json().get('data', [])
+
+        records: list[dict[str, Any]] = []
+        for page_number in range(1, MAX_DETAIL_PAGES + 1):
+            params['page[number]'] = page_number
+            try:
+                resp = self.session.get(f'{self.base_url}/detail_records', params=dict(params), timeout=20)
+                resp.raise_for_status()
+                payload = resp.json()
+                if not isinstance(payload, dict) or not isinstance(payload.get('data'), list):
+                    raise ValueError('Telnyx returned an invalid detail-record response')
+            except Exception as exc:
+                if records:
+                    raise PartialDetailRecordsError(records, exc) from exc
+                raise
+
+            page = payload['data']
+            records.extend(page[:target - len(records)])
+            if not page or len(records) >= target:
+                return records
+            meta = payload.get('meta') if isinstance(payload.get('meta'), dict) else {}
+            try:
+                total_pages = int(meta.get('total_pages'))
+            except (TypeError, ValueError, OverflowError):
+                total_pages = None
+            if total_pages is not None:
+                if page_number >= total_pages:
+                    return records
+            elif len(page) < page_size:
+                return records
+
+        # Never scan an unbounded number of pages, even with faulty metadata.
+        raise PartialDetailRecordsError(records, PaginationLimitError())
 
     def search_available_numbers(
         self,

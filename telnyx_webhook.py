@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 try:
@@ -14,8 +15,12 @@ except ImportError:
 
 def parse_telnyx_inbound_event(event: dict[str, Any]) -> tuple[str, str, str, str | None] | None:
     data = event.get('data', {}) if isinstance(event, dict) else {}
+    if not isinstance(data, dict):
+        return None
     event_type = data.get('event_type')
-    payload = data.get('payload', {}) if isinstance(data, dict) else {}
+    payload = data.get('payload', {})
+    if event_type and event_type != 'message.received':
+        return None
 
     if event_type == 'message.received' and isinstance(payload, dict):
         return parse_inbound_payload(payload)
@@ -35,20 +40,51 @@ def parse_telnyx_inbound_event(event: dict[str, Any]) -> tuple[str, str, str, st
             from_number = str(candidate.get('cli') or candidate.get('from') or '')
             to_number = str(candidate.get('cld') or candidate.get('to') or '')
             body = str(candidate.get('text') or candidate.get('body') or candidate.get('message') or '')
-            message_id = candidate.get('id')
+            message_id = candidate.get('id') or candidate.get('uuid')
             if from_number and to_number:
                 return to_number, from_number, body, message_id
     return None
 
 
+def inbound_received_at(event: dict[str, Any]) -> datetime | None:
+    """Use Telnyx's receive time, falling back to its event time if necessary."""
+    data = event.get('data') if isinstance(event, dict) else None
+    data = data if isinstance(data, dict) else {}
+    payload = data.get('payload')
+    payload = payload if isinstance(payload, dict) else {}
+    now = datetime.now(timezone.utc)
+    for value in (payload.get('received_at'), data.get('occurred_at')):
+        if not isinstance(value, str) or len(value) > 100:
+            continue
+        try:
+            timestamp = datetime.fromisoformat(value.strip().replace('Z', '+00:00'))
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            timestamp = timestamp.astimezone(timezone.utc)
+        except (ValueError, OverflowError):
+            continue
+        # A bad future timestamp must not keep a message indefinitely or make
+        # an older SMS appear newer. Allow small provider clock differences.
+        if timestamp <= now + timedelta(minutes=5):
+            return timestamp
+    return None
+
+
 def parse_inbound_payload(payload: dict[str, Any]) -> tuple[str, str, str, str | None] | None:
+    direction = payload.get('direction')
+    if isinstance(direction, str) and direction.lower() != 'inbound':
+        return None
     from_number = _phone(payload.get('from'))
     to_number = _first_to_number(payload.get('to'))
     body = payload.get('text') or payload.get('body') or payload.get('message') or ''
-    message_id = payload.get('id')
+    if isinstance(body, dict):
+        body = body.get('text') or ''
+    if not isinstance(body, str):
+        return None
+    message_id = payload.get('id') or payload.get('uuid')
     if not from_number or not to_number:
         return None
-    return to_number, from_number, body, message_id
+    return to_number, from_number, body, str(message_id) if message_id else None
 
 
 def _phone(value: Any) -> str:
@@ -79,33 +115,46 @@ def _configured_public_keys() -> list[str]:
     return keys
 
 
+def signature_required() -> bool:
+    value = os.getenv('TELNYX_REQUIRE_SIGNATURE', '').strip().lower()
+    # Unknown non-empty values fail closed instead of accidentally disabling it.
+    return value not in {'', '0', 'false', 'no', 'off'}
+
+
 def verify_telnyx_signature(raw_body: bytes, headers) -> bool:
     public_keys = _configured_public_keys()
-    tolerance = int(os.getenv('TELNYX_SIGNATURE_TOLERANCE', '300') or '300')
     if not public_keys:
-        return True
+        # Compatibility for existing deployments. Set TELNYX_REQUIRE_SIGNATURE
+        # to fail closed even if a public key was accidentally omitted.
+        return not signature_required()
+
+    try:
+        tolerance = int(os.getenv('TELNYX_SIGNATURE_TOLERANCE', '300') or '300')
+    except ValueError:
+        return False
+    if tolerance <= 0:
+        return False
 
     signature_b64 = headers.get('telnyx-signature-ed25519') or headers.get('Telnyx-Signature-Ed25519')
     timestamp = headers.get('telnyx-timestamp') or headers.get('Telnyx-Timestamp')
-    if not signature_b64 or not timestamp:
+    if not isinstance(signature_b64, str) or not isinstance(timestamp, str):
         return False
 
     try:
         timestamp_int = int(timestamp)
     except ValueError:
         return False
-
     if abs(time.time() - timestamp_int) > tolerance:
         return False
 
     try:
         from nacl.exceptions import BadSignatureError
         from nacl.signing import VerifyKey
-        signature = base64.b64decode(signature_b64)
+        signature = base64.b64decode(signature_b64, validate=True)
         signed_payload = timestamp.encode('utf-8') + b'|' + raw_body
         for public_key_b64 in public_keys:
             try:
-                public_key = base64.b64decode(public_key_b64)
+                public_key = base64.b64decode(public_key_b64, validate=True)
                 VerifyKey(public_key).verify(signed_payload, signature)
                 return True
             except (ValueError, BadSignatureError):

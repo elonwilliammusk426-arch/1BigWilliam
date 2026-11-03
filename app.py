@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import os
 import threading
+from datetime import datetime, timezone
 from typing import Any
 
-import requests
 from flask import Flask, jsonify, request
 
 try:
@@ -13,20 +13,40 @@ try:
 except ImportError:
     pass
 
+import alerts
 import notify
 import store
-from config import load_config
-from telnyx import TelnyxClient
-from telnyx_sync import start_polling_if_enabled, sync_inbound_once
-from telnyx_webhook import parse_telnyx_inbound_event, verify_telnyx_signature
+import telegram_security
+from config import configured_telnyx_api_keys, load_config, sync_lookback_hours
+from telnyx import MAX_DETAIL_RECORDS, TelnyxClient
+from telnyx_sync import _safe_error, start_polling_if_enabled, sync_inbound_once
+from telnyx_webhook import (
+    _configured_public_keys, inbound_received_at, parse_telnyx_inbound_event, signature_required,
+    verify_telnyx_signature,
+)
 
 app = Flask(__name__)
+# Avoid accepting unbounded request bodies from either public webhook.
+app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024
+if not telegram_security.configured_secret():
+    if telegram_security.secret_required():
+        app.logger.error('Telegram webhook secret is required but not configured; requests will be rejected')
+    else:
+        app.logger.warning('Telegram webhook authentication is disabled; configure TELEGRAM_WEBHOOK_SECRET')
+elif not telegram_security.valid_secret(telegram_security.configured_secret()):
+    app.logger.error('Invalid TELEGRAM_WEBHOOK_SECRET; Telegram webhook requests will be rejected')
+if not _configured_public_keys():
+    if signature_required():
+        app.logger.error('Telnyx signature verification is required but no public key is configured')
+    else:
+        app.logger.warning('Telnyx signature verification is disabled; configure a public key')
 store.init_db()
+alerts.start_delivery_worker()
 start_polling_if_enabled()
 
 _sync_lock = threading.Lock()
 
-MAX_TELEGRAM_MESSAGE = 3900
+MAX_TELEGRAM_MESSAGE = notify.MAX_TELEGRAM_MESSAGE
 HELP_TEXT = (
     '📩 Telnyx → Telegram bridge\n'
     'Owner-only inbox.\n\n'
@@ -38,6 +58,7 @@ HELP_TEXT = (
     '• /available [country] [area] [limit] — search Telnyx SMS numbers\n'
     '• /syncsms [limit] — pull recent inbound SMS from your Telnyx accounts\n'
     '• /testalert — send a Telegram test alert\n'
+    '• /status — configuration and pending-alert diagnostics\n'
     '• /whoami — your Telegram user id\n'
     '• /chatid — this chat/group id\n\n'
     'Example:\n'
@@ -45,20 +66,8 @@ HELP_TEXT = (
 )
 
 
-def _telegram_token() -> str:
-    return os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
-
-
-def _owner_id() -> int:
-    return int(os.getenv('OWNER_TELEGRAM_ID', '0') or '0')
-
-
 def _lookback_hours() -> int:
-    try:
-        value = int(os.getenv('TELNYX_SYNC_LOOKBACK_HOURS', '48') or '48')
-    except ValueError:
-        value = 48
-    return max(1, min(value, 24 * 30))
+    return sync_lookback_hours()
 
 
 def _configured_numbers() -> list[str]:
@@ -71,43 +80,8 @@ def _configured_numbers() -> list[str]:
     return values
 
 
-def _telegram_chunks(text: str, limit: int = MAX_TELEGRAM_MESSAGE) -> list[str]:
-    if len(text) <= limit:
-        return [text]
-    chunks: list[str] = []
-    current = ''
-    for line in text.splitlines(keepends=True):
-        if len(line) > limit:
-            if current:
-                chunks.append(current)
-                current = ''
-            for i in range(0, len(line), limit):
-                chunks.append(line[i:i+limit])
-            continue
-        if len(current) + len(line) > limit:
-            chunks.append(current)
-            current = line
-        else:
-            current += line
-    if current:
-        chunks.append(current)
-    return chunks
-
-
-def send_telegram(chat_id: int | str, text: str) -> None:
-    token = _telegram_token()
-    if not token or not chat_id:
-        return
-    for chunk in _telegram_chunks(text):
-        requests.post(
-            f'https://api.telegram.org/bot{token}/sendMessage',
-            json={'chat_id': chat_id, 'text': chunk},
-            timeout=15,
-        )
-
-
-def _authorized(user_id: int | None) -> bool:
-    return bool(user_id and user_id == _owner_id())
+def send_telegram(chat_id: int | str, text: str) -> bool:
+    return notify.send_telegram(chat_id, text)
 
 
 def _parse_limit(value: str | None, default: int, maximum: int = 50) -> int:
@@ -125,11 +99,12 @@ def _format_messages(messages: list[store.InboundMessage]) -> str:
         return f'No inbound messages in the last {_lookback_hours()} hours.'
     lines: list[str] = []
     for m in messages:
+        body = m.body or '(Message text unavailable; it may be redacted or media-only.)'
         lines.append(
             f'#{m.id} [{m.received_at}]\n'
             f'To: {m.to_number}\n'
             f'From: {m.from_number}\n'
-            f'{m.body}\n'
+            f'{body}\n'
         )
     text = '\n'.join(lines).strip()
     if len(text) > MAX_TELEGRAM_MESSAGE:
@@ -185,12 +160,65 @@ def _format_available_numbers(numbers: list[dict[str, Any]], country: str, area_
 
 def _syncsms_summary(res) -> str:
     text = (
-        f'Sync complete for the last {_lookback_hours()} hours. Accounts: {res.accounts}, checked: {res.checked}, '
-        f'stored new: {res.stored}, skipped: {res.skipped}.'
+        f'Sync finished for the last {_lookback_hours()} hours. Accounts: {res.accounts}, '
+        f'records returned: {res.returned}, checked: {res.checked}, '
+        f'stored/updated: {res.stored}, skipped: {res.skipped}, '
+        f'alerts pending: {store.pending_notification_count()}.'
     )
+    if res.missing_ids:
+        text += f'\nRecords missing an id/uuid: {res.missing_ids}.'
+    if res.missing_timestamps:
+        text += f'\nRecords missing a usable timestamp: {res.missing_timestamps}.'
+    if res.unavailable_text:
+        text += (f'\nMessage text unavailable: {res.unavailable_text}. '
+                 'Check Telnyx redaction or whether the message is media-only.')
+    if res.limited_accounts:
+        text += (f'\nAccounts that reached the requested record limit: {res.limited_accounts}. '
+                 f'Older records may be omitted; you can request up to {MAX_DETAIL_RECORDS} per account.')
     if res.errors:
         text += '\nErrors: ' + '; '.join(res.errors[:3])
+    if not res.returned and not res.errors:
+        text += '\nTelnyx returned no inbound records for the configured accounts and date range.'
     return text
+
+
+def _status_text() -> str:
+    secret = telegram_security.configured_secret()
+    if not secret:
+        telegram_auth = ('required but missing; requests rejected' if telegram_security.secret_required()
+                         else 'disabled (legacy mode)')
+    elif not telegram_security.valid_secret(secret):
+        telegram_auth = 'invalid secret; requests rejected'
+    else:
+        telegram_auth = 'configured (webhook must be registered with the same secret)'
+
+    if _configured_public_keys():
+        telnyx_auth = 'configured'
+        try:
+            if int(os.getenv('TELNYX_SIGNATURE_TOLERANCE', '300') or '300') <= 0:
+                raise ValueError
+        except ValueError:
+            telnyx_auth = 'invalid signature tolerance; requests rejected'
+    elif signature_required():
+        telnyx_auth = 'required but public key missing; requests rejected'
+    else:
+        telnyx_auth = 'disabled (legacy mode)'
+
+    polling = os.getenv('TELNYX_POLLING_ENABLED', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+    destination = bool(os.getenv('TELEGRAM_ALERT_CHAT_ID', '').strip() or telegram_security.owner_id())
+    db_path = 'custom path (verify a persistent volume is mounted)' if os.getenv('INBOUND_DB_PATH', '').strip() else 'default local path (may be ephemeral)'
+    return (
+        'Bridge status (configuration only; not a live provider check):\n'
+        f'Telnyx accounts configured: {len(configured_telnyx_api_keys())}\n'
+        f'Telnyx webhook signature: {telnyx_auth}\n'
+        f'Telegram webhook secret: {telegram_auth}\n'
+        f'Telegram bot token: {"configured" if os.getenv("TELEGRAM_BOT_TOKEN", "").strip() else "missing"}\n'
+        f'Owner ID: {"configured" if telegram_security.owner_id() else "missing or invalid"}\n'
+        f'Alert destination: {"configured" if destination else "missing"}\n'
+        f'Polling: {"enabled" if polling else "disabled"}\n'
+        f'Pending alerts: {store.pending_notification_count()}\n'
+        f'Database: {db_path}'
+    )
 
 
 def _start_background_syncsms(chat_id: int | str, limit: int) -> bool:
@@ -202,11 +230,16 @@ def _start_background_syncsms(chat_id: int | str, limit: int) -> bool:
             res = sync_inbound_once(limit=limit, notify_new=True)
             send_telegram(chat_id, _syncsms_summary(res))
         except Exception as exc:
-            send_telegram(chat_id, f'Sync failed: {exc}')
+            reason = 'Missing TELNYX_API_KEY' if str(exc) == 'Missing TELNYX_API_KEY' else type(exc).__name__
+            send_telegram(chat_id, f'Sync failed: {reason}. Check Railway deploy logs.')
         finally:
             _sync_lock.release()
 
-    threading.Thread(target=worker, name='syncsms-worker', daemon=True).start()
+    try:
+        threading.Thread(target=worker, name='syncsms-worker', daemon=True).start()
+    except Exception:
+        _sync_lock.release()
+        raise
     return True
 
 
@@ -222,48 +255,60 @@ def health():
 
 @app.post('/inbound/sms')
 def inbound_sms():
-    store.prune_old_messages(hours=_lookback_hours())
     raw_body = request.get_data()
     if not verify_telnyx_signature(raw_body, request.headers):
+        app.logger.warning('Telnyx inbound webhook rejected: invalid signature')
         return jsonify({'ok': False, 'error': 'invalid_signature'}), 403
 
     event = request.get_json(silent=True) or {}
-    data = event.get('data', {})
-    event_type = data.get('event_type')
+    data = event.get('data', {}) if isinstance(event, dict) else {}
+    event_type = data.get('event_type') if isinstance(data, dict) else None
+    if event_type and event_type != 'message.received':
+        return jsonify({'ok': True, 'ignored': True}), 200
 
     parsed = parse_telnyx_inbound_event(event)
     if not parsed:
-        if event_type in {'message.sent', 'message.finalized'}:
-            return jsonify({'ok': True, 'ignored': event_type}), 200
-        notify.notify_owner(
-            '⚠️ Telnyx webhook received but inbound SMS could not be parsed.\n'
-            f'Event type: {event_type or "unknown"}'
-        )
+        app.logger.warning('Telnyx inbound webhook could not be parsed')
         return jsonify({'ok': False, 'error': 'could_not_parse_payload'}), 400
 
+    store.prune_old_messages(hours=_lookback_hours())
     to_number, from_number, body, message_id = parsed
-    row_id = store.save_message(to_number=to_number, from_number=from_number, body=body)
-    notify.notify_owner(
-        '📩 SMS received\n'
-        f'To: {to_number}\n'
-        f'From: {from_number}\n'
-        f'Telnyx message id: {message_id or "-"}\n\n'
-        f'{body}'
+    row_id, created = store.save_telnyx_message(
+        to_number=to_number, from_number=from_number, body=body,
+        message_id=message_id, notify=True, received_at=inbound_received_at(event),
+        # Even an old provider event is a new delivery to the bridge. Retain it
+        # from arrival so it can be alerted instead of being pruned immediately.
+        retention_at=datetime.now(timezone.utc),
     )
-    return jsonify({'ok': True, 'stored_id': row_id}), 200
+    alerts.wake_delivery_worker()
+    # Acknowledge quickly after the SMS and its alert have been stored. Telegram
+    # delivery happens asynchronously and is retried if it fails.
+    return jsonify({'ok': True, 'stored_id': row_id, 'duplicate': not created}), 200
 
 
 @app.post('/telegram/webhook')
 def telegram_webhook():
-    update = request.get_json(silent=True) or {}
+    if not telegram_security.verify_webhook(request.headers):
+        app.logger.warning('Telegram webhook rejected: invalid secret')
+        return jsonify({'ok': False, 'error': 'invalid_secret'}), 403
+
+    update = request.get_json(silent=True)
+    if not isinstance(update, dict):
+        return jsonify({'ok': True, 'ignored': True}), 200
     message = update.get('message') or update.get('edited_message') or {}
+    if not isinstance(message, dict):
+        return jsonify({'ok': True, 'ignored': True}), 200
     chat = message.get('chat') or {}
     user = message.get('from') or {}
+    if not isinstance(chat, dict) or not isinstance(user, dict):
+        return jsonify({'ok': True, 'ignored': True}), 200
     chat_id = chat.get('id')
     user_id = user.get('id')
-    text = (message.get('text') or '').strip()
-
-    if not chat_id or not text.startswith('/'):
+    text = message.get('text')
+    if type(chat_id) is not int or not chat_id or not isinstance(text, str):
+        return jsonify({'ok': True, 'ignored': True}), 200
+    text = text.strip()
+    if not text.startswith('/'):
         return jsonify({'ok': True, 'ignored': True}), 200
 
     parts = text.split()
@@ -278,8 +323,10 @@ def telegram_webhook():
         send_telegram(chat_id, f'This chat id: {chat_id}\nChat type: {chat.get("type", "-")}')
         return jsonify({'ok': True}), 200
 
-    if not _authorized(user_id):
-        send_telegram(chat_id, '🚫 Unauthorized.')
+    if not telegram_security.authorized(user_id, chat_id):
+        # Do not send replies to arbitrary chats supplied by a forged update.
+        if chat_id in telegram_security.allowed_command_chats():
+            send_telegram(chat_id, '🚫 Unauthorized.')
         return jsonify({'ok': True, 'unauthorized': True}), 200
 
     store.prune_old_messages(hours=_lookback_hours())
@@ -310,17 +357,22 @@ def telegram_webhook():
             numbers = client.search_available_numbers(country_code=country, area_code=area_code, limit=limit)
             send_telegram(chat_id, _format_available_numbers(numbers, country, area_code))
         except Exception as exc:
-            send_telegram(chat_id, f'Could not search available numbers. Error: {exc}')
+            send_telegram(chat_id, f'Could not search available numbers. Error: {_safe_error(exc)}')
     elif command == '/syncsms':
-        limit = _parse_limit(args[0] if args else None, default=20, maximum=100)
+        limit = _parse_limit(args[0] if args else None, default=20, maximum=MAX_DETAIL_RECORDS)
         started = _start_background_syncsms(chat_id, limit)
         if started:
-            send_telegram(chat_id, f'Sync started in background for up to {limit} records per account. I will send the result when it finishes.')
+            send_telegram(chat_id, f'Sync started (or queued behind polling) for up to {limit} records per account. I will send the result when it finishes.')
         else:
             send_telegram(chat_id, 'A sync is already running. Wait for the result message, then try again if needed.')
+    elif command == '/status':
+        send_telegram(chat_id, _status_text())
     elif command == '/testalert':
-        notify.notify_owner('✅ Telegram alert test successful.')
-        send_telegram(chat_id, 'Sent a test alert to TELEGRAM_ALERT_CHAT_ID.')
+        sent = notify.notify_owner('✅ Telegram alert test successful.')
+        if sent:
+            send_telegram(chat_id, 'Telegram accepted the test alert for the configured alert chat.')
+        else:
+            send_telegram(chat_id, 'Test alert failed. Check TELEGRAM_BOT_TOKEN, TELEGRAM_ALERT_CHAT_ID, bot access to that chat, and Railway deploy logs.')
     else:
         send_telegram(chat_id, 'Unknown command. Send /help')
 
