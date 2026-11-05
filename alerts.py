@@ -20,11 +20,16 @@ _worker: threading.Thread | None = None
 def _format_alert(message: store.InboundMessage) -> str:
     provider_id = message.provider_message_id or ''
     message_id = provider_id.rsplit(':', 1)[-1] if provider_id else '-'
-    body = message.body or '(Message text unavailable; it may be redacted or media-only.)'
+    if store.body_is_incomplete(message.body):
+        body = ('[Message text unavailable] Telnyx did not provide text. It may be redacted, '
+                'media-only, or temporarily unavailable. Later syncs can retry the text lookup.')
+    else:
+        body = message.body
     return (
         '📩 SMS received\n'
         f'To: {message.to_number}\n'
         f'From: {message.from_number}\n'
+        f'Received: {message.received_at}\n'
         f'Telnyx message id: {message_id}\n\n'
         f'{body}'
     )
@@ -63,6 +68,10 @@ def deliver_pending(limit: int = BATCH_SIZE) -> int:
 
 def wake_delivery_worker() -> None:
     _wake.set()
+
+
+def delivery_worker_running() -> bool:
+    return _worker is not None and _worker.is_alive()
 
 
 def _delivery_loop() -> None:

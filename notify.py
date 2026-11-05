@@ -73,3 +73,43 @@ def send_telegram(chat_id: int | str, text: str) -> bool:
 def notify_owner(text: str) -> bool:
     chat_id = os.getenv('TELEGRAM_ALERT_CHAT_ID', '').strip() or os.getenv('OWNER_TELEGRAM_ID', '').strip()
     return send_telegram(chat_id, text)
+
+
+def send_voice_owner(audio: bytes, audio_format: str, caption: str) -> str:
+    """Return sent, retry, or uncertain. Never log a token or message content.
+
+    Telegram offers no idempotency key for sendVoice. If the connection fails
+    after submission, it might already have accepted the upload; retrying that
+    case automatically could duplicate a sensitive recording.
+    """
+    token = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
+    chat_id = os.getenv('TELEGRAM_ALERT_CHAT_ID', '').strip() or os.getenv('OWNER_TELEGRAM_ID', '').strip()
+    if not token or not chat_id:
+        logger.warning('Telegram audio delivery is not configured')
+        return 'retry'
+    if audio_format not in {'ogg', 'mp3'} or not audio:
+        return 'failed'
+    mime = 'audio/ogg' if audio_format == 'ogg' else 'audio/mpeg'
+    try:
+        response = requests.post(
+            f'https://api.telegram.org/bot{token}/sendVoice',
+            data={'chat_id': chat_id, 'caption': caption[:1024]},
+            files={'voice': (f'voice.{audio_format}', audio, mime)},
+            timeout=(5, 30),
+            allow_redirects=False,
+        )
+    except requests.RequestException as exc:
+        logger.warning('Telegram audio delivery unconfirmed: %s', type(exc).__name__)
+        return 'uncertain'
+
+    # An explicit Bot API rejection is safe to retry; a 5xx or malformed
+    # response may have happened after acceptance and remains uncertain.
+    try:
+        payload = response.json()
+    except ValueError:
+        return 'uncertain'
+    if response.ok and isinstance(payload, dict) and payload.get('ok') is True:
+        return 'sent'
+    if 400 <= response.status_code < 500 and isinstance(payload, dict) and payload.get('ok') is False:
+        return 'retry'
+    return 'uncertain'

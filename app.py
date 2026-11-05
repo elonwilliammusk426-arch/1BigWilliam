@@ -14,9 +14,15 @@ except ImportError:
     pass
 
 import alerts
+import audio_delivery
+import audio_store
 import notify
 import store
 import telegram_security
+import telnyx_sync
+import voice_config
+import voice_recordings
+from voice_webhook import voice_blueprint
 from config import configured_telnyx_api_keys, load_config, sync_lookback_hours
 from telnyx import MAX_DETAIL_RECORDS, TelnyxClient
 from telnyx_sync import _safe_error, start_polling_if_enabled, sync_inbound_once
@@ -41,10 +47,18 @@ if not _configured_public_keys():
     else:
         app.logger.warning('Telnyx signature verification is disabled; configure a public key')
 store.init_db()
+app.register_blueprint(voice_blueprint)
+audio_store.configure_features(
+    sms=audio_store.enabled('SMS_VOICE_ENABLED'),
+    calls=audio_store.enabled('TELNYX_VOICE_ENABLED'),
+    imports=audio_store.enabled('TELNYX_RECORDING_IMPORT_ENABLED'),
+)
 alerts.start_delivery_worker()
+audio_delivery.start_if_enabled()
 start_polling_if_enabled()
 
 _sync_lock = threading.Lock()
+_import_lock = threading.Lock()
 
 MAX_TELEGRAM_MESSAGE = notify.MAX_TELEGRAM_MESSAGE
 HELP_TEXT = (
@@ -57,6 +71,8 @@ HELP_TEXT = (
     '• /mynumbers — configured Telnyx numbers\n'
     '• /available [country] [area] [limit] — search Telnyx SMS numbers\n'
     '• /syncsms [limit] — pull recent inbound SMS from your Telnyx accounts\n'
+    '• /importrecordings [limit] — deliberately import programmable call recordings\n'
+    '• /retryaudio confirm — retry unconfirmed/failed audio (may duplicate)\n'
     '• /testalert — send a Telegram test alert\n'
     '• /status — configuration and pending-alert diagnostics\n'
     '• /whoami — your Telegram user id\n'
@@ -158,12 +174,28 @@ def _format_available_numbers(numbers: list[dict[str, Any]], country: str, area_
     return text
 
 
-def _syncsms_summary(res) -> str:
+def _alert_chat_note(chat_id: int | str | None) -> str:
+    if chat_id is None:
+        return ''
+    destination = os.getenv('TELEGRAM_ALERT_CHAT_ID', '').strip() or str(telegram_security.owner_id() or '')
+    if not destination:
+        return 'No alert destination is configured.'
+    try:
+        if int(destination) == int(chat_id):
+            return 'SMS alerts go to this chat.'
+        return 'SMS alerts go to a different chat (the configured alert destination).'
+    except (TypeError, ValueError):
+        return 'SMS alerts go to the configured alert destination, which may be a different chat.'
+
+
+def _syncsms_summary(res, chat_id: int | str | None = None) -> str:
     text = (
         f'Sync finished for the last {_lookback_hours()} hours. Accounts: {res.accounts}, '
         f'records returned: {res.returned}, checked: {res.checked}, '
         f'stored/updated: {res.stored}, skipped: {res.skipped}, '
         f'alerts pending: {store.pending_notification_count()}.'
+        f'\nChecked includes previously stored records ({res.already_stored} already complete). '
+        'Stored/updated is not the same as delivered.'
     )
     if res.missing_ids:
         text += f'\nRecords missing an id/uuid: {res.missing_ids}.'
@@ -171,18 +203,25 @@ def _syncsms_summary(res) -> str:
         text += f'\nRecords missing a usable timestamp: {res.missing_timestamps}.'
     if res.unavailable_text:
         text += (f'\nMessage text unavailable: {res.unavailable_text}. '
-                 'Check Telnyx redaction or whether the message is media-only.')
+                 'Incomplete records with known sender and recipient can produce a missing-text alert; '
+                 'later syncs retry the lookup. Check Telnyx redaction, media-only messages, or lookup errors.')
     if res.limited_accounts:
         text += (f'\nAccounts that reached the requested record limit: {res.limited_accounts}. '
                  f'Older records may be omitted; you can request up to {MAX_DETAIL_RECORDS} per account.')
     if res.errors:
-        text += '\nErrors: ' + '; '.join(res.errors[:3])
+        shown = res.errors[:50]
+        text += f'\nErrors ({len(res.errors)}): ' + '; '.join(shown)
+        if len(shown) < len(res.errors):
+            text += f'; {len(res.errors) - len(shown)} more not shown'
     if not res.returned and not res.errors:
         text += '\nTelnyx returned no inbound records for the configured accounts and date range.'
+    note = _alert_chat_note(chat_id)
+    if note:
+        text += '\n' + note
     return text
 
 
-def _status_text() -> str:
+def _status_text(chat_id: int | str | None = None) -> str:
     secret = telegram_security.configured_secret()
     if not secret:
         telegram_auth = ('required but missing; requests rejected' if telegram_security.secret_required()
@@ -207,16 +246,63 @@ def _status_text() -> str:
     polling = os.getenv('TELNYX_POLLING_ENABLED', '').strip().lower() in {'1', 'true', 'yes', 'on'}
     destination = bool(os.getenv('TELEGRAM_ALERT_CHAT_ID', '').strip() or telegram_security.owner_id())
     db_path = 'custom path (verify a persistent volume is mounted)' if os.getenv('INBOUND_DB_PATH', '').strip() else 'default local path (may be ephemeral)'
+    poll_status = telnyx_sync.polling_status()
+    if poll_status.get('last_completed_at'):
+        last_poll = (
+            f'{poll_status["last_completed_at"]}; checked {poll_status["checked"]}; '
+            f'stored/updated {poll_status["stored"]}; errors {poll_status["errors"]}; '
+            f'missing IDs {poll_status.get("missing_ids", 0)}; '
+            f'invalid timestamps {poll_status.get("missing_timestamps", 0)}; '
+            f'text unavailable {poll_status.get("unavailable_text", 0)}; '
+            f'accounts at limit {poll_status.get("limited_accounts", 0)}'
+        )
+        if poll_status.get('failure'):
+            last_poll += f'; failed ({poll_status["failure"]})'
+    else:
+        last_poll = 'not yet completed in this process'
+    note = _alert_chat_note(chat_id)
+    note_line = f'{note}\n' if note else ''
+    audio = audio_store.status()
+    audio_issue_labels = {
+        'sms_too_long': 'SMS too long', 'speech_unavailable': 'speech generation unavailable',
+        'recording_unavailable': 'recording unavailable', 'unsupported_recording': 'unsupported recording location/format',
+        'recording_too_large': 'recording too large', 'recording_identity_mismatch': 'recording identity mismatch',
+        'telegram_rejected': 'Telegram rejected audio', 'delivery_unconfirmed': 'delivery unconfirmed',
+        'unsupported_audio': 'unsupported audio', 'audio_processing_error': 'audio processing error',
+    }
+    audio_issues = audio_store.issue_counts()
+    audio_issue_line = ('Audio issues: ' + ', '.join(
+        f'{audio_issue_labels[code]} {count}' for code, count in audio_issues.items()
+    ) + '\n') if audio_issues else ''
+    sms_audio = audio_store.enabled('SMS_VOICE_ENABLED')
+    call_audio = audio_store.enabled('TELNYX_VOICE_ENABLED')
+    recording_import = audio_store.enabled('TELNYX_RECORDING_IMPORT_ENABLED')
+    voice_connections = voice_config.connections()
+    call_configured = sum(voice_config.is_call_configured(key) for key in voice_connections)
+    sms_audio_auth = ('; unsigned webhooks cannot produce audio' if sms_audio and not _configured_public_keys() else '')
     return (
-        'Bridge status (configuration only; not a live provider check):\n'
+        'Bridge status (configuration only plus local worker state; not a live provider check):\n'
         f'Telnyx accounts configured: {len(configured_telnyx_api_keys())}\n'
         f'Telnyx webhook signature: {telnyx_auth}\n'
         f'Telegram webhook secret: {telegram_auth}\n'
         f'Telegram bot token: {"configured" if os.getenv("TELEGRAM_BOT_TOKEN", "").strip() else "missing"}\n'
         f'Owner ID: {"configured" if telegram_security.owner_id() else "missing or invalid"}\n'
         f'Alert destination: {"configured" if destination else "missing"}\n'
+        f'{note_line}'
         f'Polling: {"enabled" if polling else "disabled"}\n'
+        f'Polling worker: {"running" if poll_status.get("running") else "stopped"}\n'
+        f'Last poll: {last_poll}\n'
+        f'Alert worker: {"running" if alerts.delivery_worker_running() else "stopped"}\n'
         f'Pending alerts: {store.pending_notification_count()}\n'
+        f'SMS voice notes: {"enabled" if sms_audio else "disabled"}{sms_audio_auth}\n'
+        f'Incoming call recording: {"enabled" if call_audio else "disabled"}\n'
+        f'Programmable recording import: {"enabled" if recording_import else "disabled"}\n'
+        f'Voice connections configured: {len(voice_connections)}; allowed numbers: {len(voice_config.allowed_numbers())}\n'
+        f'Call configuration complete: {call_configured}/{len(voice_connections)} connections (not verified)\n'
+        f'Audio worker: {"running" if audio_delivery.worker_running() else "stopped"}\n'
+        f'Audio pending: {audio.get("pending", 0) + audio.get("sending", 0)}; '
+        f'unconfirmed: {audio.get("uncertain", 0)}; failed: {audio.get("failed", 0)}\n'
+        f'{audio_issue_line}'
         f'Database: {db_path}'
     )
 
@@ -228,7 +314,7 @@ def _start_background_syncsms(chat_id: int | str, limit: int) -> bool:
     def worker() -> None:
         try:
             res = sync_inbound_once(limit=limit, notify_new=True)
-            send_telegram(chat_id, _syncsms_summary(res))
+            send_telegram(chat_id, _syncsms_summary(res, chat_id=chat_id))
         except Exception as exc:
             reason = 'Missing TELNYX_API_KEY' if str(exc) == 'Missing TELNYX_API_KEY' else type(exc).__name__
             send_telegram(chat_id, f'Sync failed: {reason}. Check Railway deploy logs.')
@@ -241,6 +327,41 @@ def _start_background_syncsms(chat_id: int | str, limit: int) -> bool:
         _sync_lock.release()
         raise
     return True
+
+
+def _start_background_recording_import(chat_id: int | str, limit: int) -> bool:
+    if not _import_lock.acquire(blocking=False):
+        return False
+
+    def worker() -> None:
+        try:
+            result = voice_recordings.import_recordings(limit=limit)
+            details = ('\nErrors: ' + '; '.join(result.error_details)) if result.error_details else ''
+            send_telegram(
+                chat_id,
+                f'Programmable recording import: checked {result.checked}, queued {result.queued}, '
+                f'skipped {result.skipped}, errors {result.errors}. '
+                'Queued does not mean delivered. This API is not a verified native-voicemail mailbox import. '
+                + _alert_chat_note(chat_id) + details,
+            )
+        except Exception as exc:
+            send_telegram(chat_id, f'Recording import failed: {type(exc).__name__}. Check the deployment logs.')
+        finally:
+            _import_lock.release()
+
+    try:
+        threading.Thread(target=worker, name='recording-import', daemon=True).start()
+    except Exception:
+        _import_lock.release()
+        raise
+    return True
+
+
+def _audio_commands_authenticated() -> bool:
+    # Owner ID/chat ID alone can be forged when Telegram legacy mode is on.
+    # The outer handler has already checked the configured secret header.
+    secret = telegram_security.configured_secret()
+    return bool(secret and telegram_security.valid_secret(secret))
 
 
 @app.get('/')
@@ -279,8 +400,13 @@ def inbound_sms():
         # Even an old provider event is a new delivery to the bridge. Retain it
         # from arrival so it can be alerted instead of being pruned immediately.
         retention_at=datetime.now(timezone.utc),
+        # Legacy unsigned SMS webhooks still work for text but cannot create
+        # an audio job. A configured key was actually verified above.
+        authenticated_for_audio=bool(_configured_public_keys()),
     )
     alerts.wake_delivery_worker()
+    if audio_store.enabled('SMS_VOICE_ENABLED'):
+        audio_delivery.wake()
     # Acknowledge quickly after the SMS and its alert have been stored. Telegram
     # delivery happens asynchronously and is retried if it fails.
     return jsonify({'ok': True, 'stored_id': row_id, 'duplicate': not created}), 200
@@ -365,12 +491,36 @@ def telegram_webhook():
             send_telegram(chat_id, f'Sync started (or queued behind polling) for up to {limit} records per account. I will send the result when it finishes.')
         else:
             send_telegram(chat_id, 'A sync is already running. Wait for the result message, then try again if needed.')
+    elif command == '/importrecordings':
+        if not _audio_commands_authenticated():
+            send_telegram(chat_id, 'Audio commands require a registered TELEGRAM_WEBHOOK_SECRET.')
+        elif not audio_store.enabled('TELNYX_RECORDING_IMPORT_ENABLED'):
+            send_telegram(chat_id, 'Programmable recording import is disabled. It does not import the native Telnyx voicemail mailbox.')
+        elif not voice_config.connections() or not voice_config.allowed_numbers():
+            send_telegram(chat_id, 'Configure voice account connections and allowed numbers before importing recordings.')
+        else:
+            limit = _parse_limit(args[0] if args else None, default=5, maximum=10)
+            if _start_background_recording_import(chat_id, limit):
+                send_telegram(chat_id, f'Import started for up to {limit} programmable call recordings; I will send the result. '
+                              'Existing native voicemail is not verified as available through this API.')
+            else:
+                send_telegram(chat_id, 'A recording import is already running.')
+    elif command == '/retryaudio':
+        if not _audio_commands_authenticated():
+            send_telegram(chat_id, 'Audio commands require a registered TELEGRAM_WEBHOOK_SECRET.')
+        elif not args or args[0].lower() != 'confirm':
+            send_telegram(chat_id, 'Unconfirmed audio may already be in Telegram. To retry and risk duplicates, send /retryaudio confirm.')
+        else:
+            count = audio_store.retry_unconfirmed(voice_config.enabled_kinds())
+            audio_delivery.wake()
+            send_telegram(chat_id, f'Requeued {count} failed or unconfirmed audio item(s). Some may be duplicates.')
     elif command == '/status':
-        send_telegram(chat_id, _status_text())
+        send_telegram(chat_id, _status_text(chat_id=chat_id))
     elif command == '/testalert':
         sent = notify.notify_owner('✅ Telegram alert test successful.')
         if sent:
-            send_telegram(chat_id, 'Telegram accepted the test alert for the configured alert chat.')
+            send_telegram(chat_id, 'Telegram accepted the test alert for the configured alert chat. '
+                          + _alert_chat_note(chat_id))
         else:
             send_telegram(chat_id, 'Test alert failed. Check TELEGRAM_BOT_TOKEN, TELEGRAM_ALERT_CHAT_ID, bot access to that chat, and Railway deploy logs.')
     else:
