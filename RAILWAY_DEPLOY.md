@@ -70,9 +70,19 @@ https://YOUR-APP.up.railway.app/inbound/sms
 ## 4. Test and diagnose
 
 - Open `/health`; it checks the process response, not providers or persistence.
-- Send `/status` and `/testalert`, and verify the alert actually appears in the destination.
+- Send `/status` and `/testalert`, and verify the alert actually appears in the configured destination. `/status` shows local worker liveness and the last poll in the current process, not an end-to-end provider check. A command reply can be in a different chat from SMS alerts.
 - Send a harmless test SMS from a phone you control. Check the Telnyx profile, message record, and webhook delivery status if it does not arrive.
-- Send `/syncsms 20` and inspect its final `records returned`, `stored/updated`, `alerts pending`, and errors. It scans a bounded number of newest records per account; text may not be available if Telnyx redacted it.
+- Send `/syncsms 20` and inspect its final `records returned`, `checked`, `stored/updated`, `alerts pending`, and errors. `checked` includes previously stored records, and neither it nor `stored/updated` is a delivery count. Account labels can change when keys are added or removed. It scans a bounded number of newest records per account.
+- A new record with identifiable sender/recipient but unavailable text queues a labeled missing-text notice. Later polls or a webhook can deliver the recovered text; the first sync after upgrade may surface previously unrecorded records within the lookback. If Telnyx has redacted or otherwise cannot supply text, the bridge cannot reconstruct the code. Review privacy before changing redaction.
 - Check Railway logs for sanitized errors. Never share secrets, phone numbers, SMS contents, or verification codes.
 
-A crash after Telegram accepts an alert but before SQLite records success may duplicate it. Replacing an ephemeral DB, or rediscovering older rows without provider IDs, can also replay recent alerts. Retention and provider availability limit recovery.
+A crash after Telegram accepts a text alert but before SQLite records success may duplicate it. Replacing an ephemeral DB, or rediscovering older rows without provider IDs, can also replay recent alerts. Retention and provider availability limit recovery.
+
+## 5. Optional audio
+
+Audio features are **off by default**. See the [full audio setup and limitations](README.md#optional-audio-read-sms-and-record-calls) before enabling them. No number routing is changed by deployment alone.
+
+- `SMS_VOICE_ENABLED=true` enables local eSpeak/FFmpeg voice notes for newly received, complete SMS. Configure and test Telnyx signatures first; unsigned legacy webhooks still produce text but not voice notes. `/status` shows audio worker/queue diagnostics. Existing messages are not automatically replayed.
+- `TELNYX_VOICE_ENABLED=true` enables a separately configured TeXML application for calls. Set `TELNYX_VOICE_CONNECTIONS`, the per-account `TELNYX_VOICE_ACCOUNT_*_API_KEY` and `*_PUBLIC_KEY` values, `TELNYX_VOICE_NUMBERS`, and a public HTTPS `VOICE_PUBLIC_BASE_URL` (or `PUBLIC_BASE_URL`). The endpoint fails closed without valid connection-specific signatures. Test with a number you control before assigning any important number. **Assigning a number changes its voice routing**: calls are answered and recorded instead of following their prior route. Consent/notice, Telnyx charges, missed first audio, failover and call-duration monitoring require your attention.
+- `TELNYX_RECORDING_IMPORT_ENABLED=true` allows the owner to deliberately request `/importrecordings 5` after registering a Telegram webhook secret. It queries programmable call recordings for explicitly configured connections/numbers, **not a verified native-voicemail mailbox import**. Telnyx documents native voicemail listening via `*98`; confirm mailbox export options with Telnyx.
+- All audio goes to the existing alert destination, whose group members can hear it. The persistent DB may temporarily hold sensitive audio and signed URLs; restrict access to the volume/backups. Pending jobs expire with the configured retention. A Telegram upload with an uncertain outcome is not automatically resent; `/retryaudio confirm` is explicit and can produce duplicates. Live provider behavior must be tested separately from the offline suite.

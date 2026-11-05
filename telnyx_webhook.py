@@ -121,12 +121,17 @@ def signature_required() -> bool:
     return value not in {'', '0', 'false', 'no', 'off'}
 
 
-def verify_telnyx_signature(raw_body: bytes, headers) -> bool:
-    public_keys = _configured_public_keys()
+def verify_telnyx_signature(
+    raw_body: bytes, headers, *, public_keys: list[str] | None = None, require: bool = False,
+) -> bool:
+    # Voice endpoints explicitly provide one connection's public key and set
+    # require=True; legacy SMS behavior remains unchanged.
+    if public_keys is None:
+        public_keys = _configured_public_keys()
     if not public_keys:
         # Compatibility for existing deployments. Set TELNYX_REQUIRE_SIGNATURE
         # to fail closed even if a public key was accidentally omitted.
-        return not signature_required()
+        return not (require or signature_required())
 
     try:
         tolerance = int(os.getenv('TELNYX_SIGNATURE_TOLERANCE', '300') or '300')

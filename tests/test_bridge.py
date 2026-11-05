@@ -147,7 +147,9 @@ class SyncTests(DatabaseTestCase):
         client = FakeTelnyx([record()], {'message-123': message('')})
         with mock.patch.object(telnyx_sync, 'telnyx_clients', return_value=[('acct1', client)]):
             first = telnyx_sync.sync_inbound_once()
-            self.assertEqual((first.unavailable_text, first.stored), (1, 0))
+            self.assertEqual((first.unavailable_text, first.stored), (1, 1))
+            self.assertFalse(store.has_complete_telnyx_message('message-123'))
+            self.assertEqual(store.pending_notification_count(), 1)
             self.assertIn('redaction', bridge_app._syncsms_summary(first))
             client.messages['message-123'] = message('recovered text')
             second = telnyx_sync.sync_inbound_once()
@@ -158,10 +160,13 @@ class SyncTests(DatabaseTestCase):
         client = FakeTelnyx([record()], {'message-123': requests.ConnectionError('secret-token in URL')})
         with mock.patch.object(telnyx_sync, 'telnyx_clients', return_value=[('acct1', client)]):
             result = telnyx_sync.sync_inbound_once()
-        self.assertEqual(result.stored, 0)
+        self.assertEqual(result.stored, 1)
+        self.assertEqual(result.unavailable_text, 1)
         self.assertEqual(result.errors, ['acct1: message details unavailable (connection failed)'])
         self.assertNotIn('secret-token', bridge_app._syncsms_summary(result))
-        self.assertFalse(store.has_telnyx_message('message-123'))
+        self.assertTrue(store.has_telnyx_message('message-123'))
+        self.assertFalse(store.has_complete_telnyx_message('message-123'))
+        self.assertEqual(store.pending_notification_count(), 1)
 
     def test_account_wide_timeout_stops_repeated_slow_lookups(self):
         records = [record('one'), record('two'), record('three')]

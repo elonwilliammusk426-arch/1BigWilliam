@@ -49,6 +49,13 @@ def get(self, url, params=None, **kwargs):
         while not Path(os.environ['TEST_BLOCK_RELEASE']).exists() and time.monotonic() < deadline:
             time.sleep(0.02)
         return Response({'data': []})
+    fixture_path = os.environ.get('TEST_RECORD_FIXTURE')
+    if fixture_path:
+        fixture = json.loads(Path(fixture_path).read_text())
+        if url.endswith('/detail_records'):
+            return Response({'data': fixture['records'], 'meta': {'total_pages': 1}})
+        if '/messages/' in url:
+            return Response({'data': fixture['messages'][url.rsplit('/', 1)[-1]]})
     if url.endswith('/detail_records'):
         return Response({'data': [{
             'uuid': 'sync-message', 'direction': 'inbound',
@@ -233,6 +240,137 @@ class GunicornHttpTest(unittest.TestCase):
                         process.kill()
                         process.wait(timeout=5)
                         self.fail('Gunicorn did not stop after the HTTP requests finished')
+                    self.assertEqual(exit_code, 0, 'Gunicorn did not shut down cleanly')
+
+    def test_gunicorn_automatically_delivers_three_then_seven_and_recovers_missing_text(self):
+        repo = Path(__file__).resolve().parents[1]
+        signing_key = SigningKey.generate()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # Only the Telnyx poller's sleep is shortened in this test; the
+            # checked-in Gunicorn command and real worker threads are used.
+            (root / 'sitecustomize.py').write_text(FAKE_PROVIDERS + r'''
+from types import SimpleNamespace
+import telnyx_sync
+telnyx_sync.time = SimpleNamespace(sleep=lambda seconds: time.sleep(0.04))
+''')
+            fixture_path = root / 'provider-records.json'
+            send_log = root / 'sent.jsonl'
+            server_log = root / 'gunicorn.log'
+            fixture = {'records': [], 'messages': {}}
+
+            def add_record(name, body):
+                fixture['records'].append({
+                    'uuid': name, 'direction': 'inbound', 'created_at': datetime.now(timezone.utc).isoformat(),
+                    'cli': '+15550000001', 'cld': '+15550000002',
+                })
+                fixture['messages'][name] = {
+                    'direction': 'inbound', 'text': body,
+                    'from': {'phone_number': '+15550000001'}, 'to': [{'phone_number': '+15550000002'}],
+                }
+
+            def publish_fixture():
+                staged = root / 'provider-records.new'
+                staged.write_text(json.dumps(fixture))
+                os.replace(staged, fixture_path)
+
+            for i in range(3):
+                add_record(f'fixture-{i}', f'automatic fixture {i}')
+            publish_fixture()
+            with socket.socket() as reserved:
+                reserved.bind(('127.0.0.1', 0))
+                port = reserved.getsockname()[1]
+            env = {
+                'PATH': os.environ.get('PATH', ''), 'PYTHONPATH': f'{root}{os.pathsep}{repo}',
+                'INBOUND_DB_PATH': str(root / 'inbound.db'), 'TELNYX_API_KEY': 'fake-key',
+                'TELNYX_BASE_URL': 'https://fixture.invalid/v2',
+                'TELNYX_PUBLIC_KEY': base64.b64encode(bytes(signing_key.verify_key)).decode(),
+                'TELNYX_REQUIRE_SIGNATURE': 'true', 'TELNYX_POLLING_ENABLED': 'true',
+                'TELNYX_POLL_INTERVAL_SECONDS': '15', 'TELNYX_POLL_LIMIT': '20',
+                'TELEGRAM_BOT_TOKEN': 'fake-token', 'TELEGRAM_ALERT_CHAT_ID': '555',
+                'OWNER_TELEGRAM_ID': '777', 'TELEGRAM_WEBHOOK_SECRET': 'test_secret',
+                'TEST_RECORD_FIXTURE': str(fixture_path), 'TEST_SEND_LOG': str(send_log),
+            }
+            base = f'http://127.0.0.1:{port}'
+
+            def wait_until(check, message, timeout=8):
+                deadline = time.monotonic() + timeout
+                while time.monotonic() < deadline:
+                    try:
+                        if check():
+                            return
+                    except (OSError, requests.RequestException, ValueError):
+                        pass
+                    time.sleep(0.025)
+                self.fail(message + '\n' + (server_log.read_text() if server_log.exists() else ''))
+
+            def sent():
+                if not send_log.exists():
+                    return []
+                return [json.loads(line)['text'] for line in send_log.read_text().splitlines() if line]
+
+            def sms_alerts():
+                return [text for text in sent() if text.startswith('📩 SMS received')]
+
+            command = shlex.split(json.loads((repo / 'railway.json').read_text())['deploy']['startCommand'])
+            command = [sys.executable, '-m', 'gunicorn'] + [arg.replace('$PORT', str(port)) for arg in command[1:]]
+            with server_log.open('w') as logs:
+                process = subprocess.Popen(command, cwd=directory, env=env, stdout=subprocess.DEVNULL, stderr=logs)
+                try:
+                    wait_until(lambda: requests.get(base + '/health', timeout=1).status_code == 200,
+                               'Gunicorn did not start')
+                    wait_until(lambda: len(sms_alerts()) == 3, 'Automatic first poll did not deliver three alerts')
+                    for i in range(3, 7):
+                        add_record(f'fixture-{i}', f'automatic fixture {i}')
+                    publish_fixture()
+                    wait_until(lambda: len(sms_alerts()) == 7, 'Automatic next poll did not deliver four new alerts')
+                    time.sleep(0.15)
+                    self.assertEqual(len(sms_alerts()), 7, 'Previously sent alerts were replayed')
+
+                    add_record('fixture-7', '')
+                    publish_fixture()
+                    wait_until(lambda: len(sms_alerts()) == 8, 'Missing-text notice was not delivered')
+                    self.assertIn('text unavailable', sms_alerts()[-1].lower())
+                    fixture['messages']['fixture-7']['text'] = 'recovered fixture text'
+                    publish_fixture()
+                    wait_until(lambda: len(sms_alerts()) == 9, 'Recovered message text was not delivered')
+                    self.assertIn('recovered fixture text', sms_alerts()[-1])
+
+                    event = {'data': {'event_type': 'message.received', 'payload': {
+                        'id': 'webhook-race', 'direction': 'inbound', 'text': 'webhook fixture text',
+                        'from': {'phone_number': '+15550000001'}, 'to': [{'phone_number': '+15550000002'}],
+                    }}}
+                    body = json.dumps(event).encode()
+                    timestamp = str(int(time.time()))
+                    signature = signing_key.sign(timestamp.encode() + b'|' + body).signature
+                    headers = {
+                        'Content-Type': 'application/json', 'Telnyx-Timestamp': timestamp,
+                        'Telnyx-Signature-Ed25519': base64.b64encode(signature).decode(),
+                    }
+                    self.assertEqual(requests.post(base + '/inbound/sms', data=body, headers=headers, timeout=3).status_code, 200)
+                    add_record('webhook-race', 'webhook fixture text')
+                    publish_fixture()
+                    wait_until(lambda: len(sms_alerts()) == 10, 'Authenticated webhook was not delivered')
+                    time.sleep(0.15)
+                    self.assertEqual(len(sms_alerts()), 10, 'Polling replayed the webhook alert')
+                    self.assertEqual(sum('webhook fixture text' in text for text in sms_alerts()), 1)
+
+                    update = {'message': {'chat': {'id': 555}, 'from': {'id': 777}, 'text': '/status'}}
+                    self.assertEqual(requests.post(
+                        base + '/telegram/webhook', json=update,
+                        headers={'X-Telegram-Bot-Api-Secret-Token': 'test_secret'}, timeout=3,
+                    ).status_code, 200)
+                    wait_until(lambda: any('Polling worker: running' in text for text in sent()),
+                               'Status did not report the automatic poll worker')
+                    self.assertTrue(any('Alert worker: running' in text for text in sent()))
+                finally:
+                    process.terminate()
+                    try:
+                        exit_code = process.wait(timeout=8)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
+                        self.fail('Gunicorn did not stop after the automatic polling test')
                     self.assertEqual(exit_code, 0, 'Gunicorn did not shut down cleanly')
 
 

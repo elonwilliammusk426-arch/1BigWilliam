@@ -466,10 +466,11 @@ class SyncUpgradeTests(DatabaseTestCase):
         client = FakeTelnyx([incomplete, complete], {'incomplete': requests.Timeout('private-token')})
         with mock.patch.object(telnyx_sync, 'telnyx_clients', return_value=[('acct1', client)]):
             result = telnyx_sync.sync_inbound_once()
-        self.assertEqual((result.checked, result.stored, result.skipped), (2, 1, 1))
+        self.assertEqual((result.checked, result.stored, result.skipped), (2, 2, 0))
+        self.assertEqual(result.unavailable_text, 1)
         self.assertEqual(client.lookups, ['incomplete'])
         self.assertIn('request timed out', result.errors[0])
-        self.assertEqual(store.recent_all()[0].body, 'ready from detail record')
+        self.assertEqual({row.body for row in store.recent_all()}, {'ready from detail record', store.MISSING_BODY})
 
     def test_invalid_or_far_future_record_timestamps_do_not_abort_an_account(self):
         overflow = record('overflow')

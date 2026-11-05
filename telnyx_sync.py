@@ -12,6 +12,8 @@ from typing import Any
 import requests
 
 import alerts
+import audio_delivery
+import audio_store
 import store
 from config import load_config, sync_lookback_hours
 from telnyx import MAX_DETAIL_RECORDS, PaginationLimitError, PartialDetailRecordsError, TelnyxClient
@@ -19,6 +21,10 @@ from telnyx import MAX_DETAIL_RECORDS, PaginationLimitError, PartialDetailRecord
 
 logger = logging.getLogger(__name__)
 _sync_guard = threading.Lock()
+_poll_start_lock = threading.Lock()
+_poll_status_lock = threading.Lock()
+_poll_thread: threading.Thread | None = None
+_last_poll: dict[str, Any] | None = None
 MAX_ACCOUNT_WORKERS = 4
 
 
@@ -34,6 +40,7 @@ class SyncResult:
     unavailable_text: int = 0
     limited_accounts: int = 0
     errors: list[str] = field(default_factory=list)
+    already_stored: int = 0
 
 
 def telnyx_api_keys() -> list[str]:
@@ -94,7 +101,12 @@ def _first_recipient(value: Any) -> str:
 
 
 def _text(*values: Any) -> str:
-    return next((value for value in values if isinstance(value, str) and value), '')
+    for value in values:
+        if isinstance(value, dict):
+            value = value.get('text')
+        if isinstance(value, str) and value:
+            return value
+    return ''
 
 
 def _safe_error(exc: Exception) -> str:
@@ -179,13 +191,27 @@ def _sync_account(
             result.skipped += 1
             _add_error(result, f'{label}: could not check stored message ({_safe_error(exc)})')
             continue
+        needs_audio_recheck = False
         if already_complete:
-            result.skipped += 1
-            continue
+            result.already_stored += 1
+            try:
+                needs_audio_recheck = notify_new and store.existing_message_needs_authenticated_audio(
+                    message_id, received_at,
+                )
+            except Exception as exc:
+                result.skipped += 1
+                _add_error(result, f'{label}: could not check audio eligibility ({_safe_error(exc)})')
+                continue
+            if not needs_audio_recheck:
+                result.skipped += 1
+                continue
 
+        record_body = _text(rec.get('text'), rec.get('body'))
+        record_from = _phone(rec.get('cli')) or _phone(rec.get('from'))
+        record_to = _phone(rec.get('cld')) or _first_recipient(rec.get('to'))
         detail_error: Exception | None = None
         msg: dict[str, Any] = {}
-        if not (_text(rec.get('text'), rec.get('body')) and _phone(rec.get('cli')) and _phone(rec.get('cld'))):
+        if not (record_body and record_from and record_to):
             if account_detail_error:
                 detail_error = account_detail_error
             else:
@@ -205,24 +231,26 @@ def _sync_account(
         if isinstance(msg.get('direction'), str) and msg['direction'].lower() != 'inbound':
             result.skipped += 1
             continue
-        from_number = _phone(msg.get('from')) or _phone(rec.get('cli'))
-        to_number = _first_recipient(msg.get('to')) or _phone(rec.get('cld'))
-        body = _text(msg.get('text'), rec.get('text'), rec.get('body'))
+        from_number = _phone(msg.get('from')) or record_from
+        to_number = _first_recipient(msg.get('to')) or record_to
+        body = _text(msg.get('text'), msg.get('body'), record_body)
+        if detail_error:
+            _add_error(result, f'{label}: message details unavailable ({_safe_error(detail_error)})')
         if not body:
-            result.skipped += 1
-            if detail_error:
-                _add_error(result, f'{label}: message details unavailable ({_safe_error(detail_error)})')
-            else:
-                result.unavailable_text += 1
-            # Do not mark a missing/redacted body as processed: a later
-            # webhook or successful lookup may contain the actual SMS.
-            continue
+            result.unavailable_text += 1
+            # Save one clearly marked incomplete message instead of silently
+            # discarding the record. Its body remains retryable: a later poll
+            # or webhook can enrich it and queue the recovered SMS.
+            body = store.MISSING_BODY
         if not to_number or not from_number:
             result.skipped += 1
             _add_error(result, f'{label}: message is missing a sender or recipient')
             continue
 
         try:
+            if (needs_audio_recheck and not store.body_is_incomplete(body)
+                    and not store.existing_message_matches(message_id, to_number, from_number, body)):
+                _add_error(result, f'{label}: stored SMS differs from authenticated provider response; audio skipped')
             _, created = store.save_telnyx_message(
                 to_number=to_number,
                 from_number=from_number,
@@ -230,6 +258,9 @@ def _sync_account(
                 message_id=message_id,
                 notify=notify_new,
                 received_at=received_at,
+                # Detail records and message lookups were fetched using the
+                # owning account's API key, unlike a legacy unsigned webhook.
+                authenticated_for_audio=True,
             )
         except Exception as exc:
             result.skipped += 1
@@ -239,8 +270,14 @@ def _sync_account(
             result.stored += 1
             if notify_new:
                 alerts.wake_delivery_worker()
+                if audio_store.enabled('SMS_VOICE_ENABLED'):
+                    audio_delivery.wake()
         else:
             result.skipped += 1
+            if needs_audio_recheck:
+                # An authenticated lookup may have queued audio for an
+                # already-stored, unsigned-first message without a text replay.
+                audio_delivery.wake()
 
     return result
 
@@ -275,7 +312,7 @@ def _sync_inbound_once_unlocked(limit: int, notify_new: bool) -> SyncResult:
             results = [future.result() for future in futures]
 
     for account in results:
-        for name in ('returned', 'checked', 'stored', 'skipped', 'accounts', 'missing_ids',
+        for name in ('returned', 'checked', 'stored', 'skipped', 'already_stored', 'accounts', 'missing_ids',
                      'missing_timestamps', 'unavailable_text', 'limited_accounts'):
             setattr(result, name, getattr(result, name) + getattr(account, name))
         for error in account.errors:
@@ -290,7 +327,34 @@ def sync_inbound_once(limit: int = 20, *, notify_new: bool = True) -> SyncResult
         return _sync_inbound_once_unlocked(max(1, min(int(limit), MAX_DETAIL_RECORDS)), notify_new)
 
 
+def polling_status() -> dict[str, Any]:
+    """Return local worker state, not a live provider or persistence check."""
+    with _poll_status_lock:
+        snapshot = dict(_last_poll) if _last_poll is not None else {}
+    snapshot['running'] = _poll_thread is not None and _poll_thread.is_alive()
+    return snapshot
+
+
+def _record_poll(result: SyncResult | None, error: Exception | None = None) -> None:
+    global _last_poll
+    snapshot: dict[str, Any] = {
+        'last_completed_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+        'checked': result.checked if result else 0,
+        'stored': result.stored if result else 0,
+        'errors': len(result.errors) if result else 1,
+        'missing_ids': result.missing_ids if result else 0,
+        'missing_timestamps': result.missing_timestamps if result else 0,
+        'unavailable_text': result.unavailable_text if result else 0,
+        'limited_accounts': result.limited_accounts if result else 0,
+    }
+    if error is not None:
+        snapshot['failure'] = _safe_error(error)
+    with _poll_status_lock:
+        _last_poll = snapshot
+
+
 def start_polling_if_enabled() -> None:
+    global _poll_thread
     enabled = os.getenv('TELNYX_POLLING_ENABLED', '').strip().lower() in {'1', 'true', 'yes', 'on'}
     if not enabled:
         return
@@ -312,16 +376,22 @@ def start_polling_if_enabled() -> None:
                     time.sleep(max(15, interval))
                     continue
                 result = sync_inbound_once(limit=limit, notify_new=True)
+                _record_poll(result)
                 if (result.errors or result.missing_ids or result.missing_timestamps
                         or result.unavailable_text or result.limited_accounts):
                     logger.warning(
-                        'Background Telnyx sync: errors=%s, missing_ids=%s, missing_timestamps=%s, '
-                        'unavailable_text=%s, accounts_at_record_limit=%s',
-                        '; '.join(result.errors[:3]) or 'none', result.missing_ids,
+                        'Background Telnyx sync: error_count=%s, errors=%s, missing_ids=%s, '
+                        'missing_timestamps=%s, unavailable_text=%s, accounts_at_record_limit=%s',
+                        len(result.errors), '; '.join(result.errors[:3]) or 'none', result.missing_ids,
                         result.missing_timestamps, result.unavailable_text, result.limited_accounts,
                     )
             except Exception as exc:
+                _record_poll(None, exc)
                 logger.error('Background Telnyx sync failed: %s', _safe_error(exc))
             time.sleep(max(15, interval))
 
-    threading.Thread(target=loop, name='telnyx-poll-sync', daemon=True).start()
+    with _poll_start_lock:
+        if _poll_thread is not None and _poll_thread.is_alive():
+            return
+        _poll_thread = threading.Thread(target=loop, name='telnyx-poll-sync', daemon=True)
+        _poll_thread.start()
